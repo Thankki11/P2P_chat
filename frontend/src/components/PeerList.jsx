@@ -1,35 +1,76 @@
-// PeerList.jsx — Sidebar list of known peers with online (green) / offline (gray) status dots.
-import React from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { usePolling } from '../hooks/usePolling'
 import { getPeerList } from '../services/api'
+import { mockPeers } from '../services/mockData'
 import NotificationBadge from './NotificationBadge'
 
-export default function PeerList({ onSelectPeer, selectedPeer }) {
-  // TODO: replace with real data from usePolling
-  const peers = []
+function initials(username = '') {
+  return username
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(part => part[0]?.toUpperCase())
+    .join('') || '?'
+}
 
-  // TODO: usePolling(getPeerList, 5000) to refresh peer list every 5 s
+export default function PeerList({
+  currentUserId,
+  selectedPeer,
+  unreadByPeer = {},
+  onSelectPeer,
+  onPeersChange,
+}) {
+  const { data, error } = usePolling(getPeerList, 5000)
+  const peers = useMemo(() => {
+    return (data || (error ? mockPeers : []))
+      .filter(peer => peer.peer_id !== currentUserId)
+      .sort((a, b) => Number(b.online) - Number(a.online) || a.username.localeCompare(b.username))
+  }, [currentUserId, data, error])
+
+  useEffect(() => {
+    onPeersChange?.(peers)
+  }, [onPeersChange, peers])
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="px-4 py-2 text-xs text-gray-400 uppercase tracking-wide">Online Peers</div>
+      <div className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
+        Peers
+      </div>
+
       {peers.length === 0 && (
-        <p className="px-4 text-sm text-gray-400">No peers online</p>
+        <div className="px-4 py-6 text-sm text-slate-400">
+          Khong co peer nao online
+        </div>
       )}
-      {peers.map(peer => (
-        <button
-          key={peer.username}
-          onClick={() => onSelectPeer(peer)}
-          className={`w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-100 transition text-left ${
-            selectedPeer?.username === peer.username ? 'bg-blue-50' : ''
-          }`}
-        >
-          {/* Status dot */}
-          <span className={`w-2.5 h-2.5 rounded-full ${peer.online ? 'bg-green-400' : 'bg-gray-300'}`} />
-          <span className="flex-1 text-sm font-medium">{peer.username}</span>
-          <NotificationBadge count={peer.unread ?? 0} />
-        </button>
-      ))}
+
+      {peers.map(peer => {
+        const selected = selectedPeer?.peer_id === peer.peer_id
+        return (
+          <button
+            key={peer.peer_id}
+            onClick={() => onSelectPeer(peer)}
+            className={`w-full border-l-4 px-4 py-3 text-left transition hover:bg-slate-50 ${
+              selected ? 'border-blue-600 bg-blue-50' : 'border-transparent'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <div className="relative grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-200 text-xs font-semibold text-slate-700">
+                {initials(peer.username)}
+                <span
+                  className={`absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white ${
+                    peer.online ? 'bg-green-500' : 'bg-slate-400'
+                  }`}
+                />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-slate-800">{peer.username}</p>
+                <p className="text-xs text-slate-400">{peer.online ? 'online' : 'offline'}</p>
+              </div>
+              <NotificationBadge count={unreadByPeer[peer.peer_id] || 0} />
+            </div>
+          </button>
+        )
+      })}
     </div>
   )
 }

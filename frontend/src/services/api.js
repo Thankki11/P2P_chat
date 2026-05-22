@@ -1,4 +1,3 @@
-// api.js — Axios instance and typed API functions for all backend REST calls.
 import axios from 'axios'
 
 const client = axios.create({
@@ -7,53 +6,54 @@ const client = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-/**
- * Register this user with the bootstrap server via the API bridge.
- * POST /register  { username, host, port }
- * Returns: { ok: bool, peers: PeerInfo[] }
- */
-export async function registerUser(username, serverHost) {
-  // TODO: parse serverHost into host + port, call POST /register
-  const { data } = await client.post('/register', { username, host: '127.0.0.1', port: 6001 })
-  return data
+function unwrapEnvelope(response) {
+  if (response && typeof response === 'object' && 'success' in response) {
+    if (!response.success) {
+      throw new Error(response.message || 'Request failed')
+    }
+    return response.data
+  }
+  return response
 }
 
-/**
- * Fetch the current list of live peers.
- * GET /peers
- * Returns: { peers: PeerInfo[] }
- */
+export async function registerUser(username, port) {
+  const { data } = await client.post('/register', { username, port: Number(port) })
+  return unwrapEnvelope(data)
+}
+
 export async function getPeerList() {
   const { data } = await client.get('/peers')
-  return data.peers ?? []
+  const payload = unwrapEnvelope(data)
+  return Array.isArray(payload) ? payload : payload?.peers ?? []
 }
 
-/**
- * Send a 1-to-1 chat message.
- * POST /send  { recipient: string, content: string }
- * Returns: { ok: bool, msg_id: string }
- */
-export async function sendMessage(recipient, content) {
-  const { data } = await client.post('/send', { recipient, content })
-  return data
+export async function sendMessage(from_id, to_id, content) {
+  const { data } = await client.post('/send', { from_id, to_id, content })
+  return unwrapEnvelope(data)
 }
 
-/**
- * Broadcast a message to a group.
- * POST /group/send  { group_id: string, members: string[], content: string }
- * Returns: { ok: bool, delivered: Record<string, bool> }
- */
-export async function sendGroupMessage(group_id, members, content) {
-  const { data } = await client.post('/group/send', { group_id, members, content })
-  return data
+export async function sendGroupMessage(from_id, group_id, member_ids, content) {
+  const { data } = await client.post('/group/send', {
+    from_id,
+    group_id,
+    member_ids,
+    content,
+  })
+  return unwrapEnvelope(data)
 }
 
-/**
- * Poll messages from / to a specific peer.
- * GET /messages/{peer_id}
- * Returns: MessageResponse[]
- */
-export async function getMessages(peer_id) {
-  const { data } = await client.get(`/messages/${peer_id}`)
-  return data
+export async function getMessages(peer_id, { limit = 50, before } = {}) {
+  const params = { limit }
+  if (before) params.before = before
+  const { data } = await client.get(`/messages/${peer_id}`, { params })
+  const payload = unwrapEnvelope(data)
+  return Array.isArray(payload) ? payload : []
+}
+
+export async function getGroupMessages(group_id, { limit = 50, before } = {}) {
+  const params = { limit }
+  if (before) params.before = before
+  const { data } = await client.get(`/messages/group/${group_id}`, { params })
+  const payload = unwrapEnvelope(data)
+  return Array.isArray(payload) ? payload : []
 }
