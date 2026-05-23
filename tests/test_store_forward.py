@@ -1,64 +1,73 @@
-"""
-test_store_forward.py — Tests for the store-and-forward offline queue.
-
-Tests:
-  - Message to an offline peer is queued (not dropped).
-  - Queue is flushed when the peer reconnects.
-  - Expired messages are removed by cleanup_expired().
-"""
-
-import pytest
-import time
-import sys, os
-
+import sys, os, time, threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
-
-from protocol import ChatMsg, StoreFwdMsg
+import pytest
+from message_handler import MessageHandler
 
 
 @pytest.fixture
 def handler():
-    """Return a fresh MessageHandler instance with a short TTL for testing."""
-    # TODO: from message_handler import MessageHandler; return MessageHandler(ttl=2)
-    return None
+    return MessageHandler()
 
 
-class TestOfflineQueue:
-    def test_message_queued_for_offline_peer(self, handler):
-        """queue_message() should store a StoreFwdMsg for the recipient."""
-        # TODO:
-        #   1. msg = ChatMsg(sender="alice", recipient="bob", content="hi")
-        #   2. sfwd = handler.queue_message("bob", msg)
-        #   3. assert isinstance(sfwd, StoreFwdMsg)
-        #   4. assert handler.queue_size("bob") == 1
-        pass
+def test_queue_message_stores(handler):
+    handler.queue_message("bob", {"content": "hi", "type": "CHAT_MSG"})
+    assert handler.queue_size("bob") == 1
 
-    def test_flush_delivers_queued_messages(self, handler):
-        """flush_queue() should call send_fn for each queued message."""
-        delivered = []
 
-        def mock_send(msg):
-            delivered.append(msg)
-            return True
+def test_flush_returns_messages(handler):
+    handler.queue_message("bob", {"content": "hi"})
+    handler.queue_message("bob", {"content": "there"})
+    msgs = handler.flush_queue("bob")
+    assert len(msgs) == 2
+    assert any(m["content"] == "hi" for m in msgs)
 
-        # TODO:
-        #   1. Queue two messages for "bob"
-        #   2. handler.flush_queue("bob", mock_send)
-        #   3. assert len(delivered) == 2
-        #   4. assert handler.queue_size("bob") == 0
-        pass
 
-    def test_expired_messages_cleaned_up(self, handler):
-        """cleanup_expired() should remove messages past their TTL."""
-        # TODO:
-        #   1. Queue a message (TTL=2s from fixture)
-        #   2. time.sleep(3)
-        #   3. removed = handler.cleanup_expired()
-        #   4. assert removed >= 1
-        #   5. assert handler.queue_size("bob") == 0
-        pass
+def test_flush_clears_queue(handler):
+    handler.queue_message("bob", {"content": "hi"})
+    handler.flush_queue("bob")
+    assert handler.queue_size("bob") == 0
 
-    def test_flush_on_reconnect_clears_queue(self, handler):
-        """After flush, queue should be empty."""
-        # TODO: queue then flush, assert queue_size == 0
-        pass
+
+def test_flush_empty_returns_empty(handler):
+    result = handler.flush_queue("nobody")
+    assert result == []
+
+
+def test_flush_second_time_returns_empty(handler):
+    handler.queue_message("bob", {"content": "hi"})
+    handler.flush_queue("bob")
+    result = handler.flush_queue("bob")
+    assert result == []
+
+
+def test_expired_message_skipped_on_flush(handler):
+    # Manually insert an expired entry
+    handler.store["bob"].append({"msg": {"content": "expired"}, "expire_at": time.time() - 1})
+    msgs = handler.flush_queue("bob")
+    assert len(msgs) == 0
+
+
+def test_cleanup_removes_expired(handler):
+    handler.store["bob"].append({"msg": {"content": "old"}, "expire_at": time.time() - 1})
+    handler.store["alice"].append({"msg": {"content": "fresh"}, "expire_at": time.time() + 3600})
+    removed = handler.cleanup_expired()
+    assert removed == 1
+    assert handler.queue_size("bob") == 0
+    assert handler.queue_size("alice") == 1
+
+
+def test_queue_size_zero_for_unknown(handler):
+    assert handler.queue_size("nonexistent") == 0
+
+
+def test_concurrent_queue(handler):
+    def enqueue():
+        for _ in range(50):
+            handler.queue_message("bob", {"content": "x"})
+
+    threads = [threading.Thread(target=enqueue) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert handler.queue_size("bob") == 200
