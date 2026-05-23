@@ -1,75 +1,84 @@
-"""
-test_protocol.py — Unit tests for protocol.py encode/decode and Pydantic validation.
-"""
-
+import uuid, time, json, sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 import pytest
 from pydantic import ValidationError
-
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
-
-from protocol import (
-    MsgType, PeerInfo, RegisterMsg, PeerListMsg, ChatMsg,
-    GroupMsg, HeartbeatMsg, AckMsg, StoreFwdMsg,
-    encode, decode,
-)
+from protocol import (MsgType, PeerListMsg, ChatMsg,
+                       GroupMsg, HeartbeatMsg, AckMsg, StoreFwdMsg,
+                       encode, decode, make_id)
 
 
-class TestPeerInfo:
-    def test_address_format(self):
-        """address() should return 'host:port'."""
-        peer = PeerInfo(username="alice", host="127.0.0.1", port=6001)
-        assert peer.address() == "127.0.0.1:6001"
+def test_msg_type_values():
+    values = {e.value for e in MsgType}
+    assert "REGISTER" in values
+    assert "PEER_LIST" in values
+    assert "CHAT_MSG" in values
+    assert "GROUP_MSG" in values
+    assert "HEARTBEAT" in values
+    assert "ACK" in values
+    assert "STORE_FWD" in values
+    assert len(values) == 7
 
-    def test_missing_field_raises(self):
-        """Missing required field should raise ValidationError."""
-        with pytest.raises(ValidationError):
-            PeerInfo(username="alice", host="127.0.0.1")  # port missing
+
+def test_make_id_is_uuid():
+    id_ = make_id()
+    parsed = uuid.UUID(id_)
+    assert str(parsed) == id_
 
 
-class TestEncodeDecode:
-    def test_register_roundtrip(self):
-        """encode then decode of RegisterMsg should produce an equal object."""
-        msg = RegisterMsg(peer=PeerInfo(username="alice", host="127.0.0.1", port=6001))
-        result = decode(encode(msg))
-        assert isinstance(result, RegisterMsg)
-        assert result.peer.username == "alice"
+def test_encode_produces_bytes_ending_newline():
+    msg = HeartbeatMsg(peer_id="abc", timestamp=time.time())
+    raw = encode(msg)
+    assert isinstance(raw, bytes)
+    assert raw.endswith(b"\n")
 
-    def test_chat_roundtrip(self):
-        """ChatMsg encode/decode roundtrip preserves all fields."""
-        msg = ChatMsg(sender="alice", recipient="bob", content="hello")
-        result = decode(encode(msg))
-        assert isinstance(result, ChatMsg)
-        assert result.content == "hello"
-        assert result.sender == "alice"
 
-    def test_peer_list_roundtrip(self):
-        """PeerListMsg with multiple peers survives encode/decode."""
-        peers = [
-            PeerInfo(username="bob", host="127.0.0.1", port=6002),
-            PeerInfo(username="carol", host="127.0.0.1", port=6003),
-        ]
-        msg = PeerListMsg(peers=peers)
-        result = decode(encode(msg))
-        assert isinstance(result, PeerListMsg)
-        assert len(result.peers) == 2
+def test_decode_parses_json():
+    data = {"type": "HEARTBEAT", "peer_id": "abc", "timestamp": 1234.0}
+    result = decode(json.dumps(data))
+    assert result["type"] == "HEARTBEAT"
+    assert result["peer_id"] == "abc"
 
-    def test_unknown_type_raises(self):
-        """decode should raise ValueError for an unknown message type."""
-        import json
-        bad_json = json.dumps({"type": "UNKNOWN_TYPE"})
-        with pytest.raises(ValueError):
-            decode(bad_json)
 
-    def test_missing_type_raises(self):
-        """decode should raise ValueError when 'type' key is absent."""
-        import json
-        bad_json = json.dumps({"content": "hi"})
-        with pytest.raises(ValueError):
-            decode(bad_json)
+def test_chat_msg_roundtrip():
+    msg = ChatMsg(msg_id=make_id(), from_id="a", to_id="b",
+                   content="hello", timestamp=time.time())
+    raw = encode(msg)
+    data = decode(raw.decode("utf-8"))
+    assert data["content"] == "hello"
+    assert data["from_id"] == "a"
 
-    def test_encode_has_newline(self):
-        """encode() output should end with a newline byte for readline()."""
-        msg = HeartbeatMsg(username="alice")
-        raw = encode(msg)
-        assert raw.endswith(b"\n")
+
+def test_chat_msg_missing_content_raises():
+    with pytest.raises((ValidationError, TypeError)):
+        ChatMsg(msg_id=make_id(), from_id="a", to_id="b", timestamp=time.time())
+
+
+def test_peer_list_msg_empty_peers():
+    msg = PeerListMsg(peers=[])
+    raw = encode(msg)
+    data = decode(raw.decode("utf-8"))
+    assert data["peers"] == []
+
+
+def test_group_msg_has_member_ids():
+    msg = GroupMsg(msg_id=make_id(), from_id="a", group_id="g1",
+                    member_ids=["b", "c"], content="hi", timestamp=time.time())
+    raw = encode(msg)
+    data = decode(raw.decode("utf-8"))
+    assert "b" in data["member_ids"]
+
+
+def test_store_fwd_msg():
+    msg = StoreFwdMsg(msg_id=make_id(), target_id="bob",
+                       payload={"content": "queued"})
+    raw = encode(msg)
+    data = decode(raw.decode("utf-8"))
+    assert data["target_id"] == "bob"
+    assert data["payload"]["content"] == "queued"
+
+
+def test_ack_msg_status():
+    msg = AckMsg(msg_id=make_id(), status="ok")
+    raw = encode(msg)
+    data = decode(raw.decode("utf-8"))
+    assert data["status"] == "ok"
