@@ -6,53 +6,71 @@ When the peer reconnects, flush_queue() delivers queued messages.
 cleanup_expired() removes messages that have passed their TTL.
 """
 
-import logging
+import threading
 import time
+import logging
 from collections import defaultdict
 from typing import List
 
-from protocol import ChatMsg, GroupMsg, StoreFwdMsg, encode
-
 logger = logging.getLogger(__name__)
-
-DEFAULT_TTL = 3600  # seconds before a queued message expires
 
 
 class MessageHandler:
     """Manages the offline message queue (store-and-forward)."""
 
-    def __init__(self, ttl: int = DEFAULT_TTL):
-        """Initialise an empty queue dict and set TTL."""
-        # TODO: queue: dict[username, list[StoreFwdMsg]]
-        self.ttl = ttl
+    def __init__(self):
+        self.store: dict = defaultdict(list)  # {target_id: [{"msg": dict, "expire_at": float}]}
+        self._lock = threading.Lock()
 
-    def queue_message(self, recipient: str, msg: ChatMsg | GroupMsg) -> StoreFwdMsg:
-        """Wrap msg in a StoreFwdMsg and add it to the recipient's queue.
+    def queue_message(self, target_id: str, msg: dict) -> None:
+        """Queue a message for delivery when the target peer comes online."""
+        try:
+            expire_at = time.time() + 86400  # 24 hours TTL
+            with self._lock:
+                self.store[target_id].append({"msg": msg, "expire_at": expire_at})
+            logger.debug(f"Queued message for {target_id}")
+        except Exception as e:
+            logger.error(f"Failed to queue message for {target_id}: {e}")
 
-        Sets expires_at = now + ttl.
-        Returns the created StoreFwdMsg.
-        """
-        # TODO: build StoreFwdMsg, append to queue[recipient]
-        pass
-
-    def flush_queue(self, recipient: str, send_fn) -> int:
-        """Deliver all queued messages for recipient by calling send_fn(msg).
-
-        Removes successfully delivered messages from the queue.
-        Returns the number of messages delivered.
-        """
-        # TODO: iterate queue[recipient], call send_fn, remove on success
-        pass
+    def flush_queue(self, peer_id: str) -> List[dict]:
+        """Return and remove all non-expired messages for peer_id."""
+        try:
+            now = time.time()
+            with self._lock:
+                entries = self.store.pop(peer_id, [])
+            valid = [e["msg"] for e in entries if e["expire_at"] > now]
+            logger.debug(f"Flushed {len(valid)} messages for {peer_id}")
+            return valid
+        except Exception as e:
+            logger.error(f"Failed to flush queue for {peer_id}: {e}")
+            return []
 
     def cleanup_expired(self) -> int:
-        """Scan all queues and remove messages whose expires_at has passed.
+        """Remove all expired entries. Returns count of removed entries."""
+        try:
+            now = time.time()
+            count = 0
+            with self._lock:
+                for peer_id in list(self.store.keys()):
+                    before = len(self.store[peer_id])
+                    self.store[peer_id] = [
+                        e for e in self.store[peer_id] if e["expire_at"] > now
+                    ]
+                    count += before - len(self.store[peer_id])
+                    if not self.store[peer_id]:
+                        del self.store[peer_id]
+            if count:
+                logger.info(f"Cleaned up {count} expired queued messages")
+            return count
+        except Exception as e:
+            logger.error(f"Failed during cleanup_expired: {e}")
+            return 0
 
-        Returns the total number of messages removed.
-        """
-        # TODO: parse expires_at, compare to now, remove expired entries
-        pass
-
-    def queue_size(self, recipient: str) -> int:
-        """Return the current number of queued messages for recipient."""
-        # TODO: return len(queue[recipient])
-        pass
+    def queue_size(self, peer_id: str) -> int:
+        """Return the number of queued messages for peer_id."""
+        try:
+            with self._lock:
+                return len(self.store.get(peer_id, []))
+        except Exception as e:
+            logger.error(f"Failed to get queue size for {peer_id}: {e}")
+            return 0
