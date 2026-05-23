@@ -2,56 +2,92 @@
 connection_manager.py — Manages outgoing TCP connections to remote peers.
 
 Provides send_to() for unicast and broadcast() for multicast delivery.
-Retries failed connections up to MAX_RETRIES times before giving up.
+Retries failed connections up to 3 times before giving up.
 """
 
 import socket
 import time
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 
-from protocol import PeerInfo, BaseModel, encode
+from pydantic import BaseModel
+from protocol import PeerInfo, encode
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
-RETRY_DELAY = 1.0  # seconds between retries
-
 
 class ConnectionManager:
-    """Handles opening, caching, and retrying TCP connections to peers."""
+    """Handles opening TCP connections to peers and delivering encoded messages."""
 
-    def __init__(self):
-        """Initialise an empty connection cache."""
-        # TODO: set up a dict to cache open sockets keyed by peer address
-        pass
+    def __init__(self, known_peers: dict):
+        self.known_peers = known_peers  # {peer_id: PeerInfo}
+        self._lock = threading.Lock()
 
-    def send_to(self, peer: PeerInfo, msg: BaseModel) -> bool:
-        """Encode msg and deliver it to a single peer over TCP.
+    def send_to(self, peer_id: str, msg: BaseModel) -> bool:
+        """Encode msg and deliver it to the peer identified by peer_id.
 
-        Retries up to MAX_RETRIES times on failure.
         Returns True on success, False if all retries are exhausted.
         """
-        # TODO: call _try_connect, send encode(msg), handle exceptions
-        pass
+        try:
+            with self._lock:
+                peer = self.known_peers.get(peer_id)
+            if not peer:
+                logger.debug(f"Unknown peer_id: {peer_id}")
+                return False
+            return self._try_connect(peer.host, peer.port, encode(msg))
+        except Exception as e:
+            logger.error(f"send_to({peer_id}) unexpected error: {e}")
+            return False
 
-    def broadcast(self, peers: List[PeerInfo], msg: BaseModel) -> dict:
-        """Send msg to every peer in the list.
+    def broadcast(self, peer_ids: List[str], msg: BaseModel) -> dict:
+        """Send msg to every peer_id in the list concurrently.
 
-        Returns a dict mapping peer.username → bool (delivery success).
+        Returns a dict mapping peer_id -> bool (delivery success).
         """
-        # TODO: iterate peers, call send_to for each, collect results
-        pass
+        results = {}
+        try:
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {
+                    executor.submit(self.send_to, pid, msg): pid
+                    for pid in peer_ids
+                }
+                for future in as_completed(futures):
+                    pid = futures[future]
+                    try:
+                        results[pid] = future.result()
+                    except Exception as e:
+                        logger.debug(f"broadcast future error for {pid}: {e}")
+                        results[pid] = False
+        except Exception as e:
+            logger.error(f"broadcast unexpected error: {e}")
+        return results
 
-    def _try_connect(self, peer: PeerInfo) -> socket.socket:
-        """Attempt to open (or reuse) a TCP connection to peer.
+    def _try_connect(self, host: str, port: int, data: bytes,
+                     retries: int = 3, timeout: int = 5) -> bool:
+        """Try to open a TCP connection and send data, with retries.
 
-        Raises ConnectionRefusedError after MAX_RETRIES failed attempts.
+        Returns True if data was sent and an ACK line was received.
         """
-        # TODO: check cache, try socket.connect with retry loop
-        pass
+        for attempt in range(retries):
+            try:
+                s = socket.create_connection((host, port), timeout=timeout)
+                s.sendall(data)
+                s.settimeout(5)
+                ack_raw = s.makefile().readline()
+                s.close()
+                return bool(ack_raw)
+            except (ConnectionRefusedError, TimeoutError, OSError) as e:
+                logger.debug(f"Attempt {attempt + 1}/{retries} to {host}:{port} failed: {e}")
+                if attempt < retries - 1:
+                    time.sleep(1)
+        return False
 
-    def close_all(self) -> None:
-        """Close all cached connections (called on shutdown)."""
-        # TODO: iterate cached sockets and close each
-        pass
+    def update_peers(self, peers: List[PeerInfo]) -> None:
+        """Replace the known_peers dict with a fresh list."""
+        try:
+            with self._lock:
+                self.known_peers = {p.peer_id: p for p in peers}
+        except Exception as e:
+            logger.error(f"update_peers error: {e}")
