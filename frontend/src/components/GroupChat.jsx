@@ -1,34 +1,54 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { getGroupMessages, sendGroupMessage } from '../services/api'
+import { useEffect, useRef, useState } from 'react'
+import { getGroupMessages, sendGroupMessage, apiErrorMessage } from '../services/api'
 import MessageBubble from './MessageBubble'
 
-export default function GroupChat({ group, currentUserId, peers = [], onToast }) {
+export default function GroupChat({ group, currentUserId, peers = [], onToast, messageEvent }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const bottomRef = useRef(null)
+  const fetchRef = useRef(null)
 
   useEffect(() => {
+    if (!group?.group_id || !currentUserId) return
     let active = true
+    setMessages([])
+    setLoading(true)
 
-    async function loadMessages() {
-      if (!group?.group_id) return
-      setLoading(true)
+    async function fetchMessages() {
       try {
-        const history = await getGroupMessages(group.group_id)
-        if (active) setMessages(history)
-      } catch {
-        if (active) setMessages([])
+        const serverMsgs = await getGroupMessages(group.group_id)
+        if (!active) return
+
+        setMessages(prev => {
+          const serverIds = new Set(serverMsgs.map(m => m.msg_id))
+          const stillPending = prev.filter(
+            m => m.msg_id?.startsWith('local-group-') && !serverIds.has(m.msg_id),
+          )
+          const merged = [...serverMsgs, ...stillPending]
+          merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+          return merged
+        })
+      } catch (err) {
+        console.warn('[GroupChat] fetch error:', apiErrorMessage(err))
       } finally {
         if (active) setLoading(false)
       }
     }
 
-    loadMessages()
+    fetchRef.current = fetchMessages
+    fetchMessages()
+
     return () => {
       active = false
     }
-  }, [group?.group_id])
+  }, [currentUserId, group?.group_id])
+
+  // WS push trigger — refetch when a group message for this group arrives.
+  useEffect(() => {
+    if (!messageEvent || !group?.group_id) return
+    if (messageEvent.group_id === group.group_id) fetchRef.current?.()
+  }, [messageEvent, group?.group_id])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -68,7 +88,8 @@ export default function GroupChat({ group, currentUserId, peers = [], onToast })
         ),
       )
     } catch (err) {
-      onToast?.(err.response?.data?.message || err.message || 'Khong gui duoc tin nhom')
+      onToast?.(apiErrorMessage(err))
+      setMessages(prev => prev.filter(m => m.msg_id !== optimistic.msg_id))
     }
   }
 

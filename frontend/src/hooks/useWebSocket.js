@@ -6,18 +6,18 @@ const BASE_DELAY = 1000   // ms — initial reconnect delay
 const MAX_DELAY  = 30000  // ms — cap on reconnect delay
 
 export function useWebSocket(userId, onMessage) {
-  const wsRef      = useRef(null)
-  const delayRef   = useRef(BASE_DELAY)
-  const stopRef    = useRef(false)
+  const wsRef        = useRef(null)
+  const delayRef     = useRef(BASE_DELAY)
+  const stopRef      = useRef(false)
+  const onMessageRef = useRef(onMessage)
+
+  useEffect(() => {
+    onMessageRef.current = onMessage
+  }, [onMessage])
 
   const connect = useCallback(() => {
     if (stopRef.current || !userId) return
 
-    // TODO: open WebSocket to ws://localhost:8000/ws/{userId}
-    //   ws.onopen    → reset delayRef to BASE_DELAY
-    //   ws.onmessage → parse JSON, call onMessage(parsed)
-    //   ws.onclose   → schedule reconnect via setTimeout(connect, delayRef * 2)
-    //   ws.onerror   → log error
     const ws = new WebSocket(`ws://localhost:8000/ws/${userId}`)
 
     ws.onopen = () => {
@@ -27,7 +27,7 @@ export function useWebSocket(userId, onMessage) {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
-        onMessage?.(data)
+        onMessageRef.current?.(data)
       } catch {
         // non-JSON frame — ignore
       }
@@ -41,11 +41,11 @@ export function useWebSocket(userId, onMessage) {
     }
 
     ws.onerror = (err) => {
-      console.error('[useWebSocket] error', err)
+      console.warn('[useWebSocket] error', err)
     }
 
     wsRef.current = ws
-  }, [userId, onMessage])
+  }, [userId])
 
   useEffect(() => {
     stopRef.current = false
@@ -57,7 +57,6 @@ export function useWebSocket(userId, onMessage) {
   }, [connect])
 
   const send = useCallback((data) => {
-    // TODO: send JSON string over the open socket (check readyState first)
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data))
     }

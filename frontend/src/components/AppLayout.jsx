@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { Navigate } from 'react-router-dom'
 import PeerList from './PeerList'
 import ChatWindow from './ChatWindow'
 import GroupChat from './GroupChat'
 import CreateGroupModal from './CreateGroupModal'
 import Toast from './Toast'
+import { useWebSocket } from '../hooks/useWebSocket'
 
 function loadGroups() {
   try {
@@ -23,10 +24,20 @@ export default function AppLayout() {
   const [peers, setPeers] = useState([])
   const [showCreateGroup, setShowCreateGroup] = useState(false)
   const [toast, setToast] = useState(null)
+  const [messageEvent, setMessageEvent] = useState(null)
 
   useEffect(() => {
     localStorage.setItem('groups', JSON.stringify(groups))
   }, [groups])
+
+  const handleWsMessage = useCallback((data) => {
+    if (!data || typeof data !== 'object') return
+    if (data.type === 'NEW_MESSAGE' || data.type === 'STORE_FWD_RECV') {
+      setMessageEvent({ ...data, _tick: Date.now() })
+    }
+  }, [])
+
+  useWebSocket(currentUserId, handleWsMessage)
 
   if (!currentUserId) {
     return <Navigate to="/" replace />
@@ -103,12 +114,14 @@ export default function AppLayout() {
             currentUserId={currentUserId}
             peers={peers}
             onToast={setToast}
+            messageEvent={messageEvent}
           />
         ) : selectedPeer ? (
           <ChatWindow
             peer={selectedPeer}
             currentUserId={currentUserId}
             onToast={setToast}
+            messageEvent={messageEvent}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-slate-400">

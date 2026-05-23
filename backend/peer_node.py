@@ -161,7 +161,7 @@ class PeerNode:
                     logger.debug(f"ACK send failed: {e}")
                 if self.on_message_callback:
                     try:
-                        self.on_message_callback(msg.from_id, {"type": "NEW_MESSAGE", **entry})
+                        self.on_message_callback(msg.from_id, {**entry, "type": "NEW_MESSAGE"})
                     except Exception as e:
                         logger.debug(f"Callback error: {e}")
 
@@ -181,7 +181,7 @@ class PeerNode:
                     logger.debug(f"ACK send failed: {e}")
                 if self.on_message_callback:
                     try:
-                        self.on_message_callback(msg.from_id, {"type": "NEW_MESSAGE", **entry})
+                        self.on_message_callback(msg.from_id, {**entry, "type": "NEW_MESSAGE"})
                     except Exception as e:
                         logger.debug(f"Callback error: {e}")
 
@@ -238,7 +238,7 @@ class PeerNode:
                             try:
                                 self.on_message_callback(
                                     data.get("from_id", ""),
-                                    {"type": "STORE_FWD_RECV", **entry}
+                                    {**entry, "type": "STORE_FWD_RECV"}
                                 )
                             except Exception as e:
                                 logger.debug(f"Callback error: {e}")

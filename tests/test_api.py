@@ -36,48 +36,94 @@ async def client(run_bootstrap):
     import api_bridge as ab
     importlib.reload(ab)
 
-    # Manually seed app.state so the lifespan isn't required for tests
-    ab.app.state.peer_node = None
+    # Manually seed app.state (multi-user: peer_nodes dict)
+    ab.app.state.peer_nodes = {}
     ab.app.state.ws_connections = {}
     ab.app.state.loop = asyncio.get_event_loop()
 
     async with AsyncClient(transport=ASGITransport(app=ab.app), base_url="http://test") as c:
         yield c
-    # Clean up peer node if registered during tests
-    if ab.app.state.peer_node:
-        ab.app.state.peer_node.stop()
 
+    for node in ab.app.state.peer_nodes.values():
+        try:
+            node.stop()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+async def _register(client, username="apitest", port=17201):
+    resp = await client.post("/register", json={
+        "username": username,
+        "port": port,
+        "bootstrap_host": "127.0.0.1",
+        "bootstrap_port": BPORT,
+    })
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_register_success(client):
-    resp = await client.post("/register", json={
-        "username": "apitest",
-        "port": 17201,
-        "bootstrap_host": "127.0.0.1",
-        "bootstrap_port": BPORT
-    })
+    resp = await _register(client, "apitest", 17201)
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is True
     assert "peer_id" in body["data"]
     assert body["data"]["username"] == "apitest"
     import uuid
-    uuid.UUID(body["data"]["peer_id"])  # should not raise
+    uuid.UUID(body["data"]["peer_id"])
+
+
+@pytest.mark.asyncio
+async def test_register_second_user(client):
+    """Second user gets their own peer_id, not the first user's."""
+    resp = await _register(client, "apitest2", 17202)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data"]["username"] == "apitest2"
+
+    # Both users registered and have distinct peer_ids
+    resp1 = await _register(client, "apitest", 17201)
+    assert resp1.json()["data"]["peer_id"] != body["data"]["peer_id"]
+
+
+@pytest.mark.asyncio
+async def test_register_idempotent(client):
+    """Re-registering same username returns same peer_id."""
+    r1 = await _register(client, "apitest", 17201)
+    r2 = await _register(client, "apitest", 17201)
+    assert r1.json()["data"]["peer_id"] == r2.json()["data"]["peer_id"]
 
 
 @pytest.mark.asyncio
 async def test_register_short_username(client):
-    resp = await client.post("/register", json={"username": "ab", "port": 17202})
+    resp = await client.post("/register", json={"username": "ab", "port": 17299})
     assert resp.status_code == 400
 
 
 @pytest.mark.asyncio
 async def test_get_peers(client):
-    resp = await client.get("/peers")
+    r = await _register(client, "apitest", 17201)
+    peer_id = r.json()["data"]["peer_id"]
+    resp = await client.get("/peers", params={"me": peer_id})
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is True
     assert isinstance(body["data"], list)
+
+
+@pytest.mark.asyncio
+async def test_get_peers_missing_me(client):
+    """?me is required — omitting it returns 422."""
+    resp = await client.get("/peers")
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -90,13 +136,13 @@ async def test_send_empty_content(client):
 
 @pytest.mark.asyncio
 async def test_send_to_unknown_peer(client):
+    r = await _register(client, "apitest", 17201)
+    from_id = r.json()["data"]["peer_id"]
     resp = await client.post("/send", json={
-        "from_id": "x", "to_id": "nonexistent-0000", "content": "hi"
+        "from_id": from_id, "to_id": "nonexistent-0000", "content": "hi"
     })
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["success"] is True
-    assert body["data"]["status"] in ("ok", "queued")
+    assert resp.json()["data"]["status"] in ("ok", "queued")
 
 
 @pytest.mark.asyncio
@@ -109,17 +155,18 @@ async def test_group_send_empty_members(client):
 
 @pytest.mark.asyncio
 async def test_get_messages(client):
-    resp = await client.get("/messages/some-peer-id")
+    r = await _register(client, "apitest", 17201)
+    peer_id = r.json()["data"]["peer_id"]
+    resp = await client.get("/messages/some-peer-id", params={"me": peer_id})
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["success"] is True
-    assert isinstance(body["data"], list)
+    assert resp.json()["success"] is True
+    assert isinstance(resp.json()["data"], list)
 
 
 @pytest.mark.asyncio
 async def test_get_group_messages(client):
-    resp = await client.get("/messages/group/g1")
+    r = await _register(client, "apitest", 17201)
+    peer_id = r.json()["data"]["peer_id"]
+    resp = await client.get("/messages/group/g1", params={"me": peer_id})
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["success"] is True
-    assert isinstance(body["data"], list)
+    assert resp.json()["success"] is True

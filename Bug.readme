@@ -1,0 +1,131 @@
+# Bug Report — Day 2 Demo
+
+Các demo của Day 2 chưa hoạt động được, ghi lại để sửa sau.
+
+---
+
+## Bug 1 — Demo 5: Đóng tab thật → peer kia KHÔNG thấy offline sau ~65s
+
+**Mô tả:**
+Khi đóng hoàn toàn browser của alice (close window), bob vẫn thấy alice online vĩnh viễn, không chuyển sang offline sau 60s grace period.
+
+**Luồng kỳ vọng:**
+1. alice đóng tab → WS đóng
+2. Backend api_bridge: WS disconnect → start grace timer 60s
+3. Sau 60s không reconnect → `node.stop()` → đóng TCP đến bootstrap
+4. Bootstrap: phát hiện TCP đóng → mark `registry[alice].online = False` → `broadcast_peer_list()`
+5. PeerList ở bob poll `/peers` mỗi 5s → thấy alice offline
+
+**Nghi vấn nguyên nhân:**
+- Có thể grace timer không chạy đúng (async task bị hủy bất ngờ hoặc không được tạo)
+- Hoặc `node.stop()` đóng socket nhưng bootstrap `handle_client` không nhận được EOF
+- Hoặc `broadcast_peer_list()` không kích hoạt khi peer offline qua timeout
+- Cần check log backend xem `Peer <id> disconnected after 60s grace` có xuất hiện không
+
+**File liên quan:**
+- [backend/api_bridge.py](backend/api_bridge.py) — `_disconnect_after_grace`, WS endpoint
+- [backend/bootstrap_server.py](backend/bootstrap_server.py) — `handle_client` finally block + `broadcast_peer_list`
+- [backend/peer_node.py](backend/peer_node.py) — `stop()` method
+
+**Cần làm:**
+- Thêm log debug ở từng bước (WS disconnect → grace start → grace expire → node.stop → bootstrap TCP close → broadcast)
+- Xác nhận `app.state.grace_timers` không bị mất khi hot-reload uvicorn
+- Có thể giảm grace period xuống 15-20s khi debug để test nhanh hơn
+
+---
+
+## Bug 2 — Demo 6: Store & Forward chưa hoạt động
+
+**Mô tả:**
+Khi alice offline, bob gửi tin → tin được queue ở bootstrap nhưng khi alice quay lại đăng nhập, alice **không nhận được** tin đã queue.
+
+**Luồng kỳ vọng:**
+1. bob gửi tin → `node.send_direct(alice_id, content)` → TCP đến alice thất bại
+2. Fallback: `_send_to_bootstrap(StoreFwdMsg)` → bootstrap `_handle_store_fwd` → `message_handler.queue_message(alice_id, payload)`
+3. alice đăng ký lại → bootstrap `_handle_register` → `message_handler.flush_queue(alice_id)`
+4. Bootstrap gửi từng msg đã queue qua TCP socket của alice → alice's `_bootstrap_listener` nhận
+5. alice's inbox có tin → WS push `STORE_FWD_RECV` → frontend hiện tin
+
+**Nghi vấn nguyên nhân:**
+- Có thể TCP từ bob đến alice **không thực sự thất bại** dù alice đã đóng tab (vì PeerNode backend vẫn chạy nếu grace chưa hết) → không trigger store-fwd
+- Hoặc `flush_queue` không được gọi khi user re-register cùng username (vì idempotent return existing node, không reconnect bootstrap)
+- Hoặc tin được flush nhưng frontend không nhận được vì WS chưa connect lại
+
+**File liên quan:**
+- [backend/peer_node.py](backend/peer_node.py) — `send_direct` fallback to store-fwd
+- [backend/bootstrap_server.py](backend/bootstrap_server.py) — `_handle_store_fwd`, `_handle_register` flush
+- [backend/message_handler.py](backend/message_handler.py) — `queue_message`, `flush_queue`
+- [backend/api_bridge.py](backend/api_bridge.py) — idempotent register có thể skip start node
+
+**Cần làm:**
+- Test scenario này phụ thuộc Bug 1 (cần alice thực sự offline ở backend)
+- Verify TCP send thất bại đúng cách khi alice offline
+- Verify register idempotent có flush queue không (hiện không gọi node.start() lại)
+
+---
+
+## Bug 3 — Demo 7: Group chat broadcast chưa test được
+
+**Mô tả:**
+Group chat tạo bằng `CreateGroupModal` chỉ lưu localStorage của người tạo. Các thành viên khác phải **tự tạo group cùng tên + cùng member_ids** mới chat được. Đây là giới hạn thiết kế Day 2, group sync server là Day 3.
+
+**Thực trạng:**
+- alice tạo group "Team A" với member [bob, charlie] → chỉ alice thấy group trong sidebar
+- bob/charlie không thấy group → không thể vào ChatWindow group đó → không nhận được tin alice gửi
+
+**Cần làm:**
+- Workaround tạm: cả 3 user phải tự tạo group cùng `group_id` (hiện random UUID nên không trùng)
+- Hoặc khi gửi `GroupMsg`, member nhận được → tự auto-add group vào sidebar
+- Đúng nhất: Day 3 — sync group state qua server
+
+**File liên quan:**
+- [frontend/src/components/CreateGroupModal.jsx](frontend/src/components/CreateGroupModal.jsx) — sinh group_id local
+- [frontend/src/components/AppLayout.jsx](frontend/src/components/AppLayout.jsx) — `groups` state ở localStorage
+- [backend/peer_node.py](backend/peer_node.py) — `send_group` đã broadcast TCP đến từng member
+
+---
+
+## Bug 4 — Backend tests fail (test_api.py)
+
+**Mô tả:**
+`tests/test_api.py` fail 7/8 với `KeyError: 'peer_node'`. Test fixture còn dùng schema cũ (`peer_node` single) chưa update sang multi-user (`peer_nodes` dict).
+
+**Lỗi cụ thể:**
+```
+starlette/datastructures.py:699: in __getattr__
+    return self._state[key]
+E   KeyError: 'peer_node'
+```
+
+Xem chi tiết: [bug_report.md](bug_report.md)
+
+**Nguyên nhân:**
+Fixture `client` trong `tests/test_api.py` seed `app.state.peer_node = None` (cũ) thay vì `app.state.peer_nodes = {}`. Một số test cũng chưa pass `?me=<peer_id>` query.
+
+Ngoài ra sau khi thêm grace period, fixture còn thiếu `app.state.grace_timers = {}`.
+
+**File liên quan:**
+- [tests/test_api.py](tests/test_api.py) — fixture client
+
+**Cần làm:**
+- Update fixture seed thêm `app.state.grace_timers = {}`
+- Verify tất cả test cases pass với multi-user schema mới
+- Chạy lại `python -m pytest tests/test_api.py -v` đến khi xanh hết
+
+---
+
+## Đã làm được (Day 2 — pass)
+
+- ✅ Demo 1: Đăng ký multi-user trên cùng api_bridge
+- ✅ Demo 2: Peer discovery (PeerList poll 5s)
+- ✅ Demo 3: Chat 1-1 realtime <500ms qua WS push
+- ✅ Demo 4: Reload không mất session (WS grace period cancel khi reconnect)
+
+---
+
+## Ưu tiên sửa
+
+1. **Bug 4** (test) — sửa fixture trước, dễ và unblock CI
+2. **Bug 1** (offline detection) — cần cho demo cuối Day 2
+3. **Bug 2** (store-fwd) — phụ thuộc Bug 1 đã fix
+4. **Bug 3** (group sync) — defer sang Day 3

@@ -1,9 +1,14 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { registerUser } from '../services/api'
 
 export default function LoginPage() {
   const navigate = useNavigate()
+
+  useEffect(() => {
+    if (localStorage.getItem('peer_id')) navigate('/chat', { replace: true })
+  }, [navigate])
+
   const [username, setUsername] = useState('')
   const [port, setPort] = useState('7001')
   const [error, setError] = useState(null)

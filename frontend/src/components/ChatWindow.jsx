@@ -1,45 +1,58 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { getMessages, sendMessage } from '../services/api'
-import { mockMessages } from '../services/mockData'
+import { useEffect, useRef, useState } from 'react'
+import { getMessages, sendMessage, apiErrorMessage } from '../services/api'
 import MessageBubble from './MessageBubble'
 
-export default function ChatWindow({ peer, currentUserId, onToast }) {
+export default function ChatWindow({ peer, currentUserId, onToast, messageEvent }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
   const bottomRef = useRef(null)
+  const fetchRef = useRef(null)
 
+  // Load history when peer changes; new messages come in via WS push trigger below.
   useEffect(() => {
+    if (!peer?.peer_id || !currentUserId) return
     let active = true
+    setMessages([])
+    setLoading(true)
 
-    async function loadMessages() {
-      if (!peer?.peer_id) return
-      setLoading(true)
-      setError(null)
+    async function fetchMessages() {
       try {
-        const history = await getMessages(peer.peer_id)
-        if (active) setMessages(history)
+        const serverMsgs = await getMessages(peer.peer_id)
+        if (!active) return
+
+        setMessages(prev => {
+          const serverIds = new Set(serverMsgs.map(m => m.msg_id))
+          const stillPending = prev.filter(
+            m => m.msg_id?.startsWith('local-') && !serverIds.has(m.msg_id),
+          )
+          const merged = [...serverMsgs, ...stillPending]
+          merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+          return merged
+        })
       } catch (err) {
-        const fallback = mockMessages.filter(
-          msg =>
-            (msg.from_id === currentUserId && msg.to_id === peer.peer_id) ||
-            (msg.from_id === peer.peer_id && msg.to_id === currentUserId),
-        )
-        if (active) {
-          setMessages(fallback)
-          setError(err.response?.data?.message || err.message)
-        }
+        console.warn('[ChatWindow] fetch error:', apiErrorMessage(err))
       } finally {
         if (active) setLoading(false)
       }
     }
 
-    loadMessages()
+    fetchRef.current = fetchMessages
+    fetchMessages()
+
     return () => {
       active = false
     }
   }, [currentUserId, peer?.peer_id])
+
+  // WS push trigger — refetch when a new message relevant to this chat arrives.
+  useEffect(() => {
+    if (!messageEvent || !peer?.peer_id) return
+    const isRelevant =
+      (messageEvent.from_id === peer.peer_id && messageEvent.to_id === currentUserId) ||
+      (messageEvent.from_id === currentUserId && messageEvent.to_id === peer.peer_id)
+    if (isRelevant) fetchRef.current?.()
+  }, [messageEvent, peer?.peer_id, currentUserId])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -50,8 +63,9 @@ export default function ChatWindow({ peer, currentUserId, onToast }) {
     const content = input.trim()
     if (!content || !peer?.peer_id || !currentUserId) return
 
+    const tempId = `local-${Date.now()}`
     const optimistic = {
-      msg_id: `local-${Date.now()}`,
+      msg_id: tempId,
       from_id: currentUserId,
       to_id: peer.peer_id,
       content,
@@ -66,19 +80,15 @@ export default function ChatWindow({ peer, currentUserId, onToast }) {
     try {
       const result = await sendMessage(currentUserId, peer.peer_id, content)
       setMessages(prev =>
-        prev.map(msg =>
-          msg.msg_id === optimistic.msg_id
-            ? {
-                ...msg,
-                msg_id: result.msg_id || msg.msg_id,
-                timestamp: result.timestamp || msg.timestamp,
-                delivered: result.delivered ?? result.status === 'ok',
-              }
-            : msg,
+        prev.map(m =>
+          m.msg_id === tempId
+            ? { ...m, msg_id: result.msg_id || tempId, delivered: result.delivered ?? result.status === 'ok' }
+            : m,
         ),
       )
     } catch (err) {
-      onToast?.(err.response?.data?.message || err.message || 'Khong gui duoc tin nhan')
+      onToast?.(apiErrorMessage(err))
+      setMessages(prev => prev.filter(m => m.msg_id !== tempId))
     }
   }
 
@@ -120,12 +130,6 @@ export default function ChatWindow({ peer, currentUserId, onToast }) {
               />
             ))}
           </div>
-        )}
-
-        {error && (
-          <p className="mt-4 text-center text-xs text-amber-600">
-            Dang hien thi du lieu mock vi API chua san sang: {error}
-          </p>
         )}
         <div ref={bottomRef} />
       </div>
