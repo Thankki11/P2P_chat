@@ -378,10 +378,10 @@ class PeerNode:
         }
 
     def get_messages(self, peer_id: str = None) -> list:
-        """Return inbox messages, optionally filtered by peer_id."""
+        """Return one-to-one inbox messages, optionally filtered by peer_id."""
         try:
             with self._inbox_lock:
-                msgs = list(self.inbox)
+                msgs = [m for m in self.inbox if not m.get("group_id")]
             if peer_id:
                 return [
                     m for m in msgs

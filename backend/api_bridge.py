@@ -17,6 +17,7 @@ Endpoints:
 
 import asyncio
 import logging
+import socket
 import time
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -133,6 +134,21 @@ def fail(message: str, code: int = 400):
     )
 
 
+def _is_port_available(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return False
+    except (ConnectionRefusedError, TimeoutError, OSError):
+        pass
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("0.0.0.0", port))
+            return True
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -157,6 +173,13 @@ class GroupSendRequest(BaseModel):
     content: str
 
 
+class GroupCreateRequest(BaseModel):
+    from_id: str
+    group_id: str
+    name: str
+    member_ids: List[str]
+
+
 class LogoutRequest(BaseModel):
     peer_id: str
 
@@ -169,12 +192,21 @@ class LogoutRequest(BaseModel):
 async def register(body: RegisterRequest):
     if len(body.username) < 3 or len(body.username) > 20:
         fail("username must be 3-20 characters")
+    if body.port < 1024 or body.port > 65535:
+        fail("port must be in range 1024-65535")
 
     # Idempotent: same username already registered → return existing node
     for node in app.state.peer_nodes.values():
         if node.username == body.username:
             peers = [p.model_dump() for p in node.get_peers()]
             return ok({"peer_id": node.peer_id, "username": node.username, "peers": peers})
+
+    for node in app.state.peer_nodes.values():
+        if node.port == body.port:
+            fail(f"port {body.port} is already in use", code=409)
+
+    if not _is_port_available(body.port):
+        fail(f"port {body.port} is already in use", code=409)
 
     try:
         node = PeerNode(
@@ -245,6 +277,35 @@ async def send_group_message(body: GroupSendRequest):
         fail("sender cannot be in member_ids")
     result = node.send_group(body.group_id, body.member_ids, body.content)
     return ok(result)
+
+
+@app.post("/group/create")
+async def create_group(body: GroupCreateRequest):
+    if not body.group_id.strip():
+        fail("group_id cannot be empty")
+    if not body.name.strip():
+        fail("group name cannot be empty")
+    if not body.member_ids:
+        fail("member_ids cannot be empty")
+
+    node = _lookup(body.from_id)
+    if node.peer_id in body.member_ids:
+        fail("sender cannot be in member_ids")
+
+    event = {
+        "type": "GROUP_CREATED",
+        "group_id": body.group_id,
+        "name": body.name,
+        "from_id": node.peer_id,
+        "from_username": node.username,
+        "member_ids": body.member_ids,
+        "timestamp": time.time(),
+    }
+
+    for member_id in body.member_ids:
+        await push_to_frontend(app, member_id, event)
+
+    return ok(event)
 
 
 @app.get("/messages/group/{group_id}")

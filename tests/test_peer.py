@@ -79,6 +79,8 @@ def test_group_broadcast(bootstrap, alice, bob):
 
     bob_msgs = bob.get_group_messages("g1")
     assert any(m.get("content") == "group hello" for m in bob_msgs)
+    private_msgs = bob.get_messages(alice.peer_id)
+    assert not any(m.get("content") == "group hello" for m in private_msgs)
     charlie.stop()
 
 
