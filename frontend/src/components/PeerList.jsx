@@ -13,64 +13,95 @@ function initials(username = '') {
     .join('') || '?'
 }
 
+function getGradientBg(username = '') {
+  const gradients = [
+    'from-pink-500 to-rose-500',
+    'from-purple-500 to-indigo-500',
+    'from-blue-500 to-teal-500',
+    'from-green-500 to-emerald-500',
+    'from-amber-500 to-orange-500',
+    'from-fuchsia-500 to-pink-600',
+  ]
+  let hash = 0
+  for (let i = 0; i < username.length; i++) {
+    hash = username.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  const index = Math.abs(hash) % gradients.length
+  return gradients[index]
+}
+
 export default function PeerList({
   currentUserId,
   selectedPeer,
   unreadByPeer = {},
+  peerStatusById = {},
   onSelectPeer,
   onPeersChange,
+  filterUnreadOnly = false,
 }) {
   const { data, error } = usePolling(getPeerList, 5000)
   const peers = useMemo(() => {
-    return (data || (error ? mockPeers : []))
+    let list = (data || (error ? mockPeers : []))
       .filter(peer => peer.peer_id !== currentUserId)
-      .sort((a, b) => Number(b.online) - Number(a.online) || a.username.localeCompare(b.username))
-  }, [currentUserId, data, error])
+      .map(peer => ({ ...peer, ...(peerStatusById[peer.peer_id] || {}) }))
+    
+    if (filterUnreadOnly) {
+      list = list.filter(peer => (unreadByPeer[peer.peer_id] || 0) > 0)
+    }
+
+    return list.sort((a, b) => Number(b.online) - Number(a.online) || a.username.localeCompare(b.username))
+  }, [currentUserId, data, error, peerStatusById, filterUnreadOnly, unreadByPeer])
 
   useEffect(() => {
     onPeersChange?.(peers)
   }, [onPeersChange, peers])
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
-        Peers
+    <div className="flex-1 overflow-y-auto px-2 py-3">
+      <div className="px-3 mb-2 text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+        Peers online
       </div>
 
       {peers.length === 0 && (
-        <div className="px-4 py-6 text-sm text-slate-400">
-          Khong co peer nao online
+        <div className="px-3 py-6 text-sm text-slate-400 dark:text-slate-500 italic">
+          Không có peer nào hoạt động
         </div>
       )}
 
-      {peers.map(peer => {
-        const selected = selectedPeer?.peer_id === peer.peer_id
-        return (
-          <button
-            key={peer.peer_id}
-            onClick={() => onSelectPeer(peer)}
-            className={`w-full border-l-4 px-4 py-3 text-left transition hover:bg-slate-50 ${
-              selected ? 'border-blue-600 bg-blue-50' : 'border-transparent'
-            }`}
-          >
-            <div className="flex items-center gap-3">
-              <div className="relative grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-200 text-xs font-semibold text-slate-700">
-                {initials(peer.username)}
-                <span
-                  className={`absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white ${
-                    peer.online ? 'bg-green-500' : 'bg-slate-400'
-                  }`}
-                />
+      <div className="space-y-0.5">
+        {peers.map(peer => {
+          const selected = selectedPeer?.peer_id === peer.peer_id
+          return (
+            <button
+              key={peer.peer_id}
+              onClick={() => onSelectPeer(peer)}
+              className={`w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left transition duration-200 hover:bg-slate-50 dark:hover:bg-slate-900/60 ${
+                selected
+                  ? 'bg-blue-50/70 border-l-4 border-blue-600 text-blue-700 dark:bg-blue-950/40 dark:text-blue-200'
+                  : 'border-l-4 border-transparent text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              <div className="relative shrink-0">
+                <div className={`grid h-9 w-9 place-items-center rounded-full bg-gradient-to-tr ${getGradientBg(peer.username)} text-xs font-bold text-white shadow-sm`}>
+                  {initials(peer.username)}
+                </div>
+                {peer.online ? (
+                  <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white bg-green-500 dark:border-slate-950">
+                    <span className="absolute inset-0 rounded-full bg-green-400 animate-ping opacity-75" />
+                  </span>
+                ) : (
+                  <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white bg-slate-400 dark:border-slate-950" />
+                )}
               </div>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-slate-800">{peer.username}</p>
-                <p className="text-xs text-slate-400">{peer.online ? 'online' : 'offline'}</p>
+                <p className="truncate text-sm font-semibold leading-tight">{peer.username}</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">{peer.online ? 'online' : 'offline'}</p>
               </div>
               <NotificationBadge count={unreadByPeer[peer.peer_id] || 0} />
-            </div>
-          </button>
-        )
-      })}
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }

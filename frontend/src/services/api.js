@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const client = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL: '/api',
   timeout: 8000,
   headers: { 'Content-Type': 'application/json' },
 })
@@ -70,6 +70,16 @@ export async function sendGroupMessage(from_id, group_id, member_ids, content) {
   return unwrapEnvelope(data)
 }
 
+export async function createGroup(from_id, group_id, name, member_ids) {
+  const { data } = await client.post('/group/create', {
+    from_id,
+    group_id,
+    name,
+    member_ids,
+  })
+  return unwrapEnvelope(data)
+}
+
 export async function getMessages(peer_id, { limit = 50, before } = {}) {
   const params = { me: myPeerId(), limit }
   if (before) params.before = before
@@ -80,7 +90,7 @@ export async function getMessages(peer_id, { limit = 50, before } = {}) {
 
 export function logoutUser(peer_id) {
   const blob = new Blob([JSON.stringify({ peer_id })], { type: 'application/json' })
-  navigator.sendBeacon('http://localhost:8000/logout', blob)
+  navigator.sendBeacon('/api/logout', blob)
 }
 
 export async function getGroupMessages(group_id, { limit = 50, before } = {}) {
