@@ -5,7 +5,6 @@ import LoginPage from './components/LoginPage'
 import AppLayout from './components/AppLayout'
 
 export default function App() {
-  // TODO: add auth context / protected route wrapper
   return (
     <BrowserRouter>
       <Routes>

@@ -16,7 +16,10 @@ export function usePolling(fetchFn, interval = 5000) {
     async function tick() {
       try {
         const result = await fetchRef.current()
-        if (active) setData(result)
+        if (active) {
+          setData(result)
+          setError(null)
+        }
       } catch (err) {
         if (active) setError(err)
       }
