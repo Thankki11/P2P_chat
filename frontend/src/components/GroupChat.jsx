@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { getGroupMessages, sendGroupMessage, apiErrorMessage } from '../services/api'
+import { openDB, saveMessage, getGroupMessages as getGroupMessagesFromDB, deleteMessage } from '../services/db'
 import MessageBubble from './MessageBubble'
 
 function initials(username = '') {
@@ -35,6 +36,7 @@ export default function GroupChat({ group, currentUserId, peers = [], onToast, m
   const bottomRef = useRef(null)
   const fetchRef = useRef(null)
 
+  // Cache-first load: show IDB immediately, then sync from API.
   useEffect(() => {
     if (!group?.group_id || !currentUserId) return
     let active = true
@@ -43,9 +45,23 @@ export default function GroupChat({ group, currentUserId, peers = [], onToast, m
 
     async function fetchMessages() {
       try {
+        await openDB(currentUserId)
+
+        // 1. Show cached messages instantly
+        const cached = await getGroupMessagesFromDB(group.group_id)
+        if (active && cached.length > 0) {
+          setMessages(cached)
+          setLoading(false)
+        }
+
+        // 2. Sync from server
         const serverMsgs = (await getGroupMessages(group.group_id))
           .filter(message => message.group_id === group.group_id)
         if (!active) return
+
+        for (const m of serverMsgs) {
+          await saveMessage(m)
+        }
 
         setMessages(prev => {
           const serverIds = new Set(serverMsgs.map(m => m.msg_id))
@@ -71,20 +87,29 @@ export default function GroupChat({ group, currentUserId, peers = [], onToast, m
     }
   }, [currentUserId, group?.group_id])
 
-  // WS push trigger — refetch when a group message for this group arrives.
+  // WS push: save to IDB and update state directly.
   useEffect(() => {
     if (!messageEvent || !group?.group_id) return
-    if (messageEvent.group_id === group.group_id) fetchRef.current?.()
+    if (messageEvent.group_id !== group.group_id) return
+
+    saveMessage(messageEvent)
+    setMessages(prev => {
+      if (prev.some(m => m.msg_id === messageEvent.msg_id)) return prev
+      const merged = [...prev, messageEvent]
+      merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      return merged
+    })
   }, [messageEvent, group?.group_id])
 
   useEffect(() => {
     if (!deliveryEvent?.msg_id) return
     setMessages(prev =>
-      prev.map(message =>
-        message.msg_id === deliveryEvent.msg_id
-          ? { ...message, delivered: true, status: deliveryEvent.status || 'ok' }
-          : message,
-      ),
+      prev.map(message => {
+        if (message.msg_id !== deliveryEvent.msg_id) return message
+        const updated = { ...message, delivered: true, status: deliveryEvent.status || 'ok' }
+        saveMessage(updated)
+        return updated
+      }),
     )
   }, [deliveryEvent])
 
@@ -107,26 +132,25 @@ export default function GroupChat({ group, currentUserId, peers = [], onToast, m
       delivered: false,
     }
 
+    await saveMessage(optimistic)
     setMessages(prev => [...prev, optimistic])
     setInput('')
 
     try {
       const result = await sendGroupMessage(currentUserId, group.group_id, group.member_ids, content)
-      setMessages(prev =>
-        prev.map(msg =>
-          msg.msg_id === optimistic.msg_id
-            ? {
-                ...msg,
-                msg_id: result.msg_id || msg.msg_id,
-                timestamp: result.timestamp || msg.timestamp,
-                delivered: (result.failed || []).length === 0,
-                queued_for: result.queued_for || [],
-              }
-            : msg,
-        ),
-      )
+      const resolved = {
+        ...optimistic,
+        msg_id: result.msg_id || optimistic.msg_id,
+        timestamp: result.timestamp || optimistic.timestamp,
+        delivered: (result.failed || []).length === 0,
+        queued_for: result.queued_for || [],
+      }
+      await saveMessage(resolved)
+      if (result.msg_id && result.msg_id !== optimistic.msg_id) await deleteMessage(optimistic.msg_id)
+      setMessages(prev => prev.map(msg => msg.msg_id === optimistic.msg_id ? resolved : msg))
     } catch (err) {
       onToast?.(apiErrorMessage(err))
+      await deleteMessage(optimistic.msg_id)
       setMessages(prev => prev.filter(m => m.msg_id !== optimistic.msg_id))
     }
   }

@@ -8,21 +8,7 @@ import Toast from './Toast'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { createGroup, logoutUser } from '../services/api'
 import { applyTheme, getStoredTheme } from '../services/theme'
-
-const GROUPS_STORAGE_KEY = 'groups'
-
-function currentGroupsStorageKey() {
-  return `${GROUPS_STORAGE_KEY}:${localStorage.getItem('username') || 'anonymous'}`
-}
-
-function loadGroups() {
-  try {
-    localStorage.removeItem(GROUPS_STORAGE_KEY)
-    return JSON.parse(localStorage.getItem(currentGroupsStorageKey()) || '[]')
-  } catch {
-    return []
-  }
-}
+import { openDB, saveGroup, getAllGroups, clearAllGroups, setUnread, getAllUnread, deleteDB } from '../services/db'
 
 function loadDarkMode() {
   return getStoredTheme() === 'dark'
@@ -63,7 +49,7 @@ export default function AppLayout() {
   const username = localStorage.getItem('username')
   const [selectedPeer, setSelectedPeer] = useState(null)
   const [selectedGroup, setSelectedGroup] = useState(null)
-  const [groups, setGroups] = useState(loadGroups)
+  const [groups, setGroups] = useState([])
   const [peers, setPeers] = useState([])
   const [peerStatusById, setPeerStatusById] = useState({})
   const [showCreateGroup, setShowCreateGroup] = useState(false)
@@ -76,38 +62,41 @@ export default function AppLayout() {
   const [activeTab, setActiveTab] = useState('all') // 'all' | 'unread' | 'groups'
 
   function handleLogout() {
-    logoutUser(currentUserId).finally(() => {
-      localStorage.removeItem('peer_id')
-      localStorage.removeItem('username')
-      localStorage.removeItem('peer_port')
-      localStorage.removeItem(GROUPS_STORAGE_KEY)
-      window.location.href = '/'
-    })
+    logoutUser(currentUserId)
+    deleteDB(currentUserId)
+    localStorage.removeItem('peer_id')
+    localStorage.removeItem('username')
+    localStorage.removeItem('peer_port')
+    window.location.href = '/'
   }
 
   useEffect(() => {
-    localStorage.removeItem(GROUPS_STORAGE_KEY)
-    localStorage.setItem(currentGroupsStorageKey(), JSON.stringify(groups))
-  }, [groups])
+    if (!currentUserId) return
+    async function init() {
+      await openDB(currentUserId)
+      const storedGroups = await getAllGroups()
+      if (storedGroups.length > 0) setGroups(storedGroups)
+      const entries = await getAllUnread()
+      if (entries.length > 0) {
+        setUnreadByPeer(Object.fromEntries(entries.map(e => [e.peer_or_group_id, e.count])))
+      }
+    }
+    init()
+  }, [currentUserId])
+
+  useEffect(() => {
+    if (!currentUserId || groups.length === 0) return
+    groups.forEach(g => saveGroup(g))
+  }, [groups, currentUserId])
+
+  useEffect(() => {
+    if (!currentUserId) return
+    Object.entries(unreadByPeer).forEach(([id, count]) => setUnread(id, count, 'peer'))
+  }, [unreadByPeer, currentUserId])
 
   useEffect(() => {
     applyTheme(darkMode ? 'dark' : 'light')
   }, [darkMode])
-
-  useEffect(() => {
-    if (!currentUserId) return
-
-    function notifyLogout() {
-      logoutUser(currentUserId)
-    }
-
-    window.addEventListener('pagehide', notifyLogout)
-    window.addEventListener('beforeunload', notifyLogout)
-    return () => {
-      window.removeEventListener('pagehide', notifyLogout)
-      window.removeEventListener('beforeunload', notifyLogout)
-    }
-  }, [currentUserId])
 
   const peerNameById = useMemo(() => {
     return peers.reduce((acc, peer) => {
@@ -257,6 +246,7 @@ export default function AppLayout() {
     setSelectedGroup(null)
     setSidebarOpen(false)
     setUnreadByPeer(prev => ({ ...prev, [peer.peer_id]: 0 }))
+    setUnread(peer.peer_id, 0, 'peer')
   }
 
   async function handleCreateGroup(group) {
@@ -286,8 +276,7 @@ export default function AppLayout() {
   function handleClearGroups() {
     setGroups([])
     setSelectedGroup(null)
-    localStorage.removeItem(GROUPS_STORAGE_KEY)
-    localStorage.removeItem(currentGroupsStorageKey())
+    clearAllGroups()
     pushToast({
       title: 'Da xoa nhom',
       message: 'Tat ca nhom local trong phien hien tai da duoc xoa.',

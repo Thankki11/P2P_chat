@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { getMessages, sendMessage, apiErrorMessage } from '../services/api'
+import { openDB, saveMessage, getMessages as getMessagesFromDB, deleteMessage } from '../services/db'
 import MessageBubble from './MessageBubble'
 
 function initials(username = '') {
@@ -35,7 +36,7 @@ export default function ChatWindow({ peer, currentUserId, onToast, messageEvent,
   const bottomRef = useRef(null)
   const fetchRef = useRef(null)
 
-  // Load history when peer changes; new messages come in via WS push trigger below.
+  // Cache-first load: show IDB immediately, then sync from API.
   useEffect(() => {
     if (!peer?.peer_id || !currentUserId) return
     let active = true
@@ -44,9 +45,24 @@ export default function ChatWindow({ peer, currentUserId, onToast, messageEvent,
 
     async function fetchMessages() {
       try {
+        await openDB(currentUserId)
+
+        // 1. Show cached messages instantly
+        const cached = await getMessagesFromDB(currentUserId, peer.peer_id)
+        if (active && cached.length > 0) {
+          setMessages(cached)
+          setLoading(false)
+        }
+
+        // 2. Sync from server
         const serverMsgs = (await getMessages(peer.peer_id))
           .filter(message => !message.group_id)
         if (!active) return
+
+        // Save any new server messages to IDB
+        for (const m of serverMsgs) {
+          await saveMessage(m)
+        }
 
         setMessages(prev => {
           const serverIds = new Set(serverMsgs.map(m => m.msg_id))
@@ -72,24 +88,33 @@ export default function ChatWindow({ peer, currentUserId, onToast, messageEvent,
     }
   }, [currentUserId, peer?.peer_id])
 
-  // WS push trigger — refetch when a new message relevant to this chat arrives.
+  // WS push: save to IDB and update state directly (no extra API call).
   useEffect(() => {
     if (!messageEvent || !peer?.peer_id) return
     if (messageEvent.group_id) return
     const isRelevant =
       (messageEvent.from_id === peer.peer_id && messageEvent.to_id === currentUserId) ||
       (messageEvent.from_id === currentUserId && messageEvent.to_id === peer.peer_id)
-    if (isRelevant) fetchRef.current?.()
+    if (!isRelevant) return
+
+    saveMessage(messageEvent)
+    setMessages(prev => {
+      if (prev.some(m => m.msg_id === messageEvent.msg_id)) return prev
+      const merged = [...prev, messageEvent]
+      merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      return merged
+    })
   }, [messageEvent, peer?.peer_id, currentUserId])
 
   useEffect(() => {
     if (!deliveryEvent?.msg_id) return
     setMessages(prev =>
-      prev.map(message =>
-        message.msg_id === deliveryEvent.msg_id
-          ? { ...message, delivered: true, status: deliveryEvent.status || 'ok' }
-          : message,
-      ),
+      prev.map(message => {
+        if (message.msg_id !== deliveryEvent.msg_id) return message
+        const updated = { ...message, delivered: true, status: deliveryEvent.status || 'ok' }
+        saveMessage(updated)
+        return updated
+      }),
     )
   }, [deliveryEvent])
 
@@ -113,20 +138,25 @@ export default function ChatWindow({ peer, currentUserId, onToast, messageEvent,
       from_username: localStorage.getItem('username') || 'me',
     }
 
+    await saveMessage(optimistic)
     setMessages(prev => [...prev, optimistic])
     setInput('')
 
     try {
       const result = await sendMessage(currentUserId, peer.peer_id, content)
+      const resolved = {
+        ...optimistic,
+        msg_id: result.msg_id || tempId,
+        delivered: result.delivered ?? result.status === 'ok',
+      }
+      await saveMessage(resolved)
+      if (result.msg_id && result.msg_id !== tempId) await deleteMessage(tempId)
       setMessages(prev =>
-        prev.map(m =>
-          m.msg_id === tempId
-            ? { ...m, msg_id: result.msg_id || tempId, delivered: result.delivered ?? result.status === 'ok' }
-            : m,
-        ),
+        prev.map(m => m.msg_id === tempId ? resolved : m),
       )
     } catch (err) {
       onToast?.(apiErrorMessage(err))
+      await deleteMessage(tempId)
       setMessages(prev => prev.filter(m => m.msg_id !== tempId))
     }
   }

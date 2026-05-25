@@ -21,11 +21,12 @@ import socket
 import threading
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Optional
 
 from protocol import (
     PeerInfo, RegisterMsg, ChatMsg, GroupMsg,
-    HeartbeatMsg, AckMsg, StoreFwdMsg, MsgType,
+    HeartbeatMsg, PeerHeartbeatMsg, AckMsg, StoreFwdMsg, MsgType,
     encode, decode, make_id
 )
 from connection_manager import ConnectionManager
@@ -56,6 +57,8 @@ class PeerNode:
         self._inbox_lock = threading.Lock()
         self._peers_lock = threading.Lock()
         self._server_sock: Optional[socket.socket] = None
+        self._peer_hb_fail_count: dict = {}   # {peer_id: int} consecutive failures
+        self._peer_hb_lock = threading.Lock()
 
     @property
     def info(self) -> PeerInfo:
@@ -101,6 +104,7 @@ class PeerNode:
 
         threading.Thread(target=self._server_loop, daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        threading.Thread(target=self._peer_heartbeat_loop, daemon=True).start()
         if self._bootstrap_conn:
             threading.Thread(target=self._bootstrap_listener, daemon=True).start()
         logger.info(f"PeerNode '{self.username}' started (id={self.peer_id})")
@@ -185,6 +189,12 @@ class PeerNode:
                     except Exception as e:
                         logger.debug(f"Callback error: {e}")
 
+            elif msg_type == MsgType.PEER_HEARTBEAT:
+                try:
+                    conn.sendall(encode(AckMsg(msg_id=data.get("from_id", "hb"), status="ok")))
+                except OSError as e:
+                    logger.debug(f"PEER_HEARTBEAT ACK send failed: {e}")
+
             elif msg_type == MsgType.PEER_LIST:
                 self._update_peers(data.get("peers", []))
 
@@ -209,6 +219,63 @@ class PeerNode:
             except OSError as e:
                 logger.warning(f"Heartbeat failed: {e}")
                 self._bootstrap_conn = None
+
+    def _peer_heartbeat_loop(self) -> None:
+        """Every 15s, ping all known online peers directly. Mark offline after 3 consecutive failures."""
+        INTERVAL = 15
+        MAX_FAILS = 3
+        while self._running:
+            time.sleep(INTERVAL)
+            if not self.conn_manager:
+                continue
+            with self._peers_lock:
+                peers_snapshot = [p for p in self.known_peers.values() if p.online]
+
+            if not peers_snapshot:
+                continue
+
+            def ping_peer(peer: PeerInfo):
+                hb = PeerHeartbeatMsg(from_id=self.peer_id, timestamp=time.time())
+                try:
+                    return peer, self.conn_manager.send_to(peer.peer_id, hb)
+                except Exception:
+                    return peer, False
+
+            with ThreadPoolExecutor(max_workers=min(len(peers_snapshot), 10)) as executor:
+                futures = {executor.submit(ping_peer, p): p for p in peers_snapshot}
+                for future in as_completed(futures):
+                    try:
+                        peer, success = future.result()
+                    except Exception:
+                        peer = futures[future]
+                        success = False
+
+                    with self._peer_hb_lock:
+                        if success:
+                            self._peer_hb_fail_count[peer.peer_id] = 0
+                            continue
+                        count = self._peer_hb_fail_count.get(peer.peer_id, 0) + 1
+                        self._peer_hb_fail_count[peer.peer_id] = count
+
+                    if count >= MAX_FAILS:
+                        with self._peers_lock:
+                            if peer.peer_id in self.known_peers:
+                                self.known_peers[peer.peer_id].online = False
+                        logger.info(
+                            f"Peer {peer.peer_id} ({peer.username}) marked offline "
+                            f"after {MAX_FAILS} HB failures"
+                        )
+                        if self.on_message_callback:
+                            try:
+                                self.on_message_callback(peer.peer_id, {
+                                    "type": "PEER_STATUS",
+                                    "peer_id": peer.peer_id,
+                                    "online": False,
+                                    "username": peer.username,
+                                    "timestamp": time.time(),
+                                })
+                            except Exception as e:
+                                logger.debug(f"Callback error on peer offline: {e}")
 
     def _bootstrap_listener(self) -> None:
         """Listen for pushed messages from the bootstrap (PEER_LIST, flushed store-fwd)."""
@@ -265,7 +332,26 @@ class PeerNode:
             with self._peers_lock:
                 self.known_peers = new_peers
             if self.conn_manager:
-                self.conn_manager.update_peers(list(new_peers.values()))
+                online_only = [p for p in new_peers.values() if p.online]
+                self.conn_manager.update_peers(online_only)
+
+            # Reconcile: if bootstrap says a peer is online but we had marked them offline,
+            # reset fail count and notify frontend they are back online.
+            with self._peer_hb_lock:
+                for pid, info in new_peers.items():
+                    if info.online and self._peer_hb_fail_count.get(pid, 0) >= 3:
+                        self._peer_hb_fail_count[pid] = 0
+                        if self.on_message_callback:
+                            try:
+                                self.on_message_callback(pid, {
+                                    "type": "PEER_STATUS",
+                                    "peer_id": pid,
+                                    "online": True,
+                                    "username": info.username,
+                                    "timestamp": time.time(),
+                                })
+                            except Exception as e:
+                                logger.debug(f"Callback error on peer online reconcile: {e}")
         except Exception as e:
             logger.error(f"_update_peers error: {e}")
 

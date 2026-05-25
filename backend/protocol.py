@@ -17,13 +17,14 @@ from pydantic import BaseModel, ConfigDict, Field
 # ---------------------------------------------------------------------------
 
 class MsgType(str, Enum):
-    REGISTER  = "REGISTER"
-    PEER_LIST = "PEER_LIST"
-    CHAT_MSG  = "CHAT_MSG"
-    GROUP_MSG = "GROUP_MSG"
-    HEARTBEAT = "HEARTBEAT"
-    ACK       = "ACK"
-    STORE_FWD = "STORE_FWD"
+    REGISTER       = "REGISTER"
+    PEER_LIST      = "PEER_LIST"
+    CHAT_MSG       = "CHAT_MSG"
+    GROUP_MSG      = "GROUP_MSG"
+    HEARTBEAT      = "HEARTBEAT"
+    PEER_HEARTBEAT = "PEER_HEARTBEAT"
+    ACK            = "ACK"
+    STORE_FWD      = "STORE_FWD"
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,14 @@ class HeartbeatMsg(BaseModel):
 
     type: str = Field(default=MsgType.HEARTBEAT)
     peer_id: str
+    timestamp: float
+
+
+class PeerHeartbeatMsg(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    type: str = Field(default=MsgType.PEER_HEARTBEAT)
+    from_id: str
     timestamp: float
 
 
