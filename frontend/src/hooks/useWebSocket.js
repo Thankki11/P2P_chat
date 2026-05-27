@@ -1,63 +1,68 @@
-// useWebSocket.js — Custom hook that opens a WebSocket to ws://localhost:8000/ws/{userId},
-//                   dispatches incoming messages, and auto-reconnects with exponential backoff.
-import { useEffect, useRef, useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 
-const BASE_DELAY = 1000   // ms — initial reconnect delay
-const MAX_DELAY  = 30000  // ms — cap on reconnect delay
+const BASE_DELAY = 1000
+const MAX_DELAY = 30000
 
 export function useWebSocket(userId, onMessage) {
-  const wsRef      = useRef(null)
-  const delayRef   = useRef(BASE_DELAY)
-  const stopRef    = useRef(false)
+  const wsRef = useRef(null)
+  const delayRef = useRef(BASE_DELAY)
+  const stopRef = useRef(false)
+  const onMessageRef = useRef(onMessage)
+  const reconnectRef = useRef(null)
+
+  useEffect(() => {
+    onMessageRef.current = onMessage
+  }, [onMessage])
 
   const connect = useCallback(() => {
     if (stopRef.current || !userId) return
 
-    // TODO: open WebSocket to ws://localhost:8000/ws/{userId}
-    //   ws.onopen    → reset delayRef to BASE_DELAY
-    //   ws.onmessage → parse JSON, call onMessage(parsed)
-    //   ws.onclose   → schedule reconnect via setTimeout(connect, delayRef * 2)
-    //   ws.onerror   → log error
-    const ws = new WebSocket(`ws://localhost:8000/ws/${userId}`)
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/${userId}`)
 
     ws.onopen = () => {
       delayRef.current = BASE_DELAY
+      console.info('[useWebSocket] connected')
     }
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
-        onMessage?.(data)
+        if (data?.type === 'PING' && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'PONG', timestamp: Date.now() / 1000 }))
+        }
+        onMessageRef.current?.(data)
       } catch {
-        // non-JSON frame — ignore
+        // Ignore non-JSON keepalive frames.
       }
     }
 
     ws.onclose = () => {
       if (stopRef.current) return
       const delay = Math.min(delayRef.current * 2, MAX_DELAY)
+      console.info(`[useWebSocket] reconnecting in ${delay / 1000}s...`)
       delayRef.current = delay
-      setTimeout(connect, delay)
+      reconnectRef.current = setTimeout(connect, delay)
     }
 
     ws.onerror = (err) => {
-      console.error('[useWebSocket] error', err)
+      console.warn('[useWebSocket] error', err)
     }
 
     wsRef.current = ws
-  }, [userId, onMessage])
+  }, [userId])
 
   useEffect(() => {
     stopRef.current = false
     connect()
     return () => {
       stopRef.current = true
+      if (reconnectRef.current) clearTimeout(reconnectRef.current)
       wsRef.current?.close()
     }
   }, [connect])
 
   const send = useCallback((data) => {
-    // TODO: send JSON string over the open socket (check readyState first)
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data))
     }

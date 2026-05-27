@@ -4,3 +4,15 @@ node_modules/
 dist/
 .env
 *.pyc
+.claude/
+.pytest_cache/
+
+# Tests và tài liệu nội bộ (không push lên repo)
+tests/
+docs/
+
+# Bản nháp báo cáo và ghi chú bug
+*.docx
+*.readme
+BACKEND_CHANGES_FOR_REVIEW.md
+bug_report.md

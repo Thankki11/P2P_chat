@@ -1,59 +1,111 @@
-// api.js — Axios instance and typed API functions for all backend REST calls.
 import axios from 'axios'
 
 const client = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL: '/api',
   timeout: 8000,
   headers: { 'Content-Type': 'application/json' },
 })
 
-/**
- * Register this user with the bootstrap server via the API bridge.
- * POST /register  { username, host, port }
- * Returns: { ok: bool, peers: PeerInfo[] }
- */
-export async function registerUser(username, serverHost) {
-  // TODO: parse serverHost into host + port, call POST /register
-  const { data } = await client.post('/register', { username, host: '127.0.0.1', port: 6001 })
-  return data
+// Extract human-readable message from FastAPI error responses.
+// FastAPI HTTPException body: { detail: { message: "..." } } or { detail: "string" }
+export function apiErrorMessage(err) {
+  const detail = err.response?.data?.detail
+  if (detail && typeof detail === 'object') return detail.message || JSON.stringify(detail)
+  if (typeof detail === 'string') return detail
+  return err.message || 'Unknown error'
 }
 
-/**
- * Fetch the current list of live peers.
- * GET /peers
- * Returns: { peers: PeerInfo[] }
- */
+// Global interceptor: if the server says "peer not registered" (server was restarted
+// or our PeerNode was torn down after grace), redirect to / so LoginPage can try
+// to RESUME with the saved peer_id. We do NOT clear localStorage — the resume flow
+// in LoginPage needs peer_id/username/port to call /register with the old identity.
+client.interceptors.response.use(
+  res => res,
+  err => {
+    if (apiErrorMessage(err) === 'peer not registered') {
+      if (window.location.pathname !== '/') window.location.replace('/')
+    }
+    return Promise.reject(err)
+  },
+)
+
+function unwrapEnvelope(response) {
+  if (response && typeof response === 'object' && 'success' in response) {
+    if (!response.success) {
+      throw new Error(response.message || 'Request failed')
+    }
+    return response.data
+  }
+  return response
+}
+
+function myPeerId() {
+  return localStorage.getItem('peer_id') || ''
+}
+
+export async function registerUser(username, port, publicKey = '', peerId = '') {
+  const { data } = await client.post('/register', {
+    username,
+    port: Number(port),
+    public_key: publicKey,
+    peer_id: peerId,
+  })
+  return unwrapEnvelope(data)
+}
+
 export async function getPeerList() {
-  const { data } = await client.get('/peers')
-  return data.peers ?? []
+  const { data } = await client.get('/peers', { params: { me: myPeerId() } })
+  const payload = unwrapEnvelope(data)
+  return Array.isArray(payload) ? payload : payload?.peers ?? []
 }
 
-/**
- * Send a 1-to-1 chat message.
- * POST /send  { recipient: string, content: string }
- * Returns: { ok: bool, msg_id: string }
- */
-export async function sendMessage(recipient, content) {
-  const { data } = await client.post('/send', { recipient, content })
-  return data
+export async function sendMessage(from_id, to_id, content) {
+  const { data } = await client.post('/send', { from_id, to_id, content })
+  return unwrapEnvelope(data)
 }
 
-/**
- * Broadcast a message to a group.
- * POST /group/send  { group_id: string, members: string[], content: string }
- * Returns: { ok: bool, delivered: Record<string, bool> }
- */
-export async function sendGroupMessage(group_id, members, content) {
-  const { data } = await client.post('/group/send', { group_id, members, content })
-  return data
+export async function sendGroupMessage(from_id, group_id, member_ids, content) {
+  const { data } = await client.post('/group/send', {
+    from_id,
+    group_id,
+    member_ids,
+    content,
+  })
+  return unwrapEnvelope(data)
 }
 
-/**
- * Poll messages from / to a specific peer.
- * GET /messages/{peer_id}
- * Returns: MessageResponse[]
- */
-export async function getMessages(peer_id) {
-  const { data } = await client.get(`/messages/${peer_id}`)
-  return data
+export async function createGroup(from_id, group_id, name, member_ids) {
+  const { data } = await client.post('/group/create', {
+    from_id,
+    group_id,
+    name,
+    member_ids,
+  })
+  return unwrapEnvelope(data)
+}
+
+export async function getMessages(peer_id, { limit = 50, before } = {}) {
+  const params = { me: myPeerId(), limit }
+  if (before) params.before = before
+  const { data } = await client.get(`/messages/${peer_id}`, { params })
+  const payload = unwrapEnvelope(data)
+  return Array.isArray(payload) ? payload : []
+}
+
+export function logoutUser(peer_id) {
+  const blob = new Blob([JSON.stringify({ peer_id })], { type: 'application/json' })
+  navigator.sendBeacon('/api/logout', blob)
+}
+
+export async function setPresence(peer_id, online) {
+  const { data } = await client.post('/presence', { peer_id, online })
+  return unwrapEnvelope(data)
+}
+
+export async function getGroupMessages(group_id, { limit = 50, before } = {}) {
+  const params = { me: myPeerId(), limit }
+  if (before) params.before = before
+  const { data } = await client.get(`/messages/group/${group_id}`, { params })
+  const payload = unwrapEnvelope(data)
+  return Array.isArray(payload) ? payload : []
 }

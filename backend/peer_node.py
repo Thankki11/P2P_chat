@@ -21,11 +21,12 @@ import socket
 import threading
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Optional
 
 from protocol import (
     PeerInfo, RegisterMsg, ChatMsg, GroupMsg,
-    HeartbeatMsg, AckMsg, StoreFwdMsg, MsgType,
+    HeartbeatMsg, PeerHeartbeatMsg, AckMsg, StoreFwdMsg, StatusUpdateMsg, MsgType,
     encode, decode, make_id
 )
 from connection_manager import ConnectionManager
@@ -38,12 +39,14 @@ class PeerNode:
     """Represents a single peer in the P2P network."""
 
     def __init__(self, username: str, port: int,
-                 bootstrap_host: str = "localhost", bootstrap_port: int = 9000):
-        self.peer_id: str = make_id()
+                 bootstrap_host: str = "localhost", bootstrap_port: int = 9000,
+                 public_key: str = "", peer_id: str = ""):
+        self.peer_id: str = peer_id or make_id()
         self.username: str = username
         self.port: int = port
         self.bootstrap_host: str = bootstrap_host
         self.bootstrap_port: int = bootstrap_port
+        self.public_key: str = public_key
 
         self.inbox: list = []
         self.known_peers: dict = {}          # {peer_id: PeerInfo}
@@ -56,6 +59,9 @@ class PeerNode:
         self._inbox_lock = threading.Lock()
         self._peers_lock = threading.Lock()
         self._server_sock: Optional[socket.socket] = None
+        self._peer_hb_fail_count: dict = {}   # {peer_id: int} consecutive failures
+        self._peer_hb_lock = threading.Lock()
+        self._presence_enabled: bool = True   # False → "Tàng hình" (invisible mode)
 
     @property
     def info(self) -> PeerInfo:
@@ -65,7 +71,8 @@ class PeerNode:
             host="127.0.0.1",
             port=self.port,
             online=True,
-            last_seen=time.time()
+            last_seen=time.time(),
+            public_key=self.public_key,
         )
 
     def start(self) -> None:
@@ -81,7 +88,8 @@ class PeerNode:
                 peer_id=self.peer_id,
                 username=self.username,
                 host="127.0.0.1",
-                port=self.port
+                port=self.port,
+                public_key=self.public_key,
             )
             with self._bootstrap_lock:
                 self._bootstrap_conn.sendall(encode(reg))
@@ -101,6 +109,7 @@ class PeerNode:
 
         threading.Thread(target=self._server_loop, daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        threading.Thread(target=self._peer_heartbeat_loop, daemon=True).start()
         if self._bootstrap_conn:
             threading.Thread(target=self._bootstrap_listener, daemon=True).start()
         logger.info(f"PeerNode '{self.username}' started (id={self.peer_id})")
@@ -161,7 +170,7 @@ class PeerNode:
                     logger.debug(f"ACK send failed: {e}")
                 if self.on_message_callback:
                     try:
-                        self.on_message_callback(msg.from_id, {"type": "NEW_MESSAGE", **entry})
+                        self.on_message_callback(msg.from_id, {**entry, "type": "NEW_MESSAGE"})
                     except Exception as e:
                         logger.debug(f"Callback error: {e}")
 
@@ -181,9 +190,15 @@ class PeerNode:
                     logger.debug(f"ACK send failed: {e}")
                 if self.on_message_callback:
                     try:
-                        self.on_message_callback(msg.from_id, {"type": "NEW_MESSAGE", **entry})
+                        self.on_message_callback(msg.from_id, {**entry, "type": "NEW_MESSAGE"})
                     except Exception as e:
                         logger.debug(f"Callback error: {e}")
+
+            elif msg_type == MsgType.PEER_HEARTBEAT:
+                try:
+                    conn.sendall(encode(AckMsg(msg_id=data.get("from_id", "hb"), status="ok")))
+                except OSError as e:
+                    logger.debug(f"PEER_HEARTBEAT ACK send failed: {e}")
 
             elif msg_type == MsgType.PEER_LIST:
                 self._update_peers(data.get("peers", []))
@@ -197,11 +212,13 @@ class PeerNode:
                 pass
 
     def _heartbeat_loop(self) -> None:
-        """Send HEARTBEAT to bootstrap every 15 seconds."""
+        """Send HEARTBEAT to bootstrap every 15 seconds. Suppressed when invisible."""
         while self._running:
             time.sleep(15)
             if not self._bootstrap_conn:
                 continue
+            if not self._presence_enabled:
+                continue   # Tàng hình: don't send heartbeat → bootstrap eventually times out
             try:
                 hb = HeartbeatMsg(peer_id=self.peer_id, timestamp=time.time())
                 with self._bootstrap_lock:
@@ -209,6 +226,63 @@ class PeerNode:
             except OSError as e:
                 logger.warning(f"Heartbeat failed: {e}")
                 self._bootstrap_conn = None
+
+    def _peer_heartbeat_loop(self) -> None:
+        """Every 15s, ping all known online peers directly. Mark offline after 3 consecutive failures."""
+        INTERVAL = 15
+        MAX_FAILS = 3
+        while self._running:
+            time.sleep(INTERVAL)
+            if not self.conn_manager:
+                continue
+            with self._peers_lock:
+                peers_snapshot = [p for p in self.known_peers.values() if p.online]
+
+            if not peers_snapshot:
+                continue
+
+            def ping_peer(peer: PeerInfo):
+                hb = PeerHeartbeatMsg(from_id=self.peer_id, timestamp=time.time())
+                try:
+                    return peer, self.conn_manager.send_to(peer.peer_id, hb)
+                except Exception:
+                    return peer, False
+
+            with ThreadPoolExecutor(max_workers=min(len(peers_snapshot), 10)) as executor:
+                futures = {executor.submit(ping_peer, p): p for p in peers_snapshot}
+                for future in as_completed(futures):
+                    try:
+                        peer, success = future.result()
+                    except Exception:
+                        peer = futures[future]
+                        success = False
+
+                    with self._peer_hb_lock:
+                        if success:
+                            self._peer_hb_fail_count[peer.peer_id] = 0
+                            continue
+                        count = self._peer_hb_fail_count.get(peer.peer_id, 0) + 1
+                        self._peer_hb_fail_count[peer.peer_id] = count
+
+                    if count >= MAX_FAILS:
+                        with self._peers_lock:
+                            if peer.peer_id in self.known_peers:
+                                self.known_peers[peer.peer_id].online = False
+                        logger.info(
+                            f"Peer {peer.peer_id} ({peer.username}) marked offline "
+                            f"after {MAX_FAILS} HB failures"
+                        )
+                        if self.on_message_callback:
+                            try:
+                                self.on_message_callback(peer.peer_id, {
+                                    "type": "PEER_STATUS",
+                                    "peer_id": peer.peer_id,
+                                    "online": False,
+                                    "username": peer.username,
+                                    "timestamp": time.time(),
+                                })
+                            except Exception as e:
+                                logger.debug(f"Callback error on peer offline: {e}")
 
     def _bootstrap_listener(self) -> None:
         """Listen for pushed messages from the bootstrap (PEER_LIST, flushed store-fwd)."""
@@ -238,7 +312,7 @@ class PeerNode:
                             try:
                                 self.on_message_callback(
                                     data.get("from_id", ""),
-                                    {"type": "STORE_FWD_RECV", **entry}
+                                    {**entry, "type": "STORE_FWD_RECV"}
                                 )
                             except Exception as e:
                                 logger.debug(f"Callback error: {e}")
@@ -262,12 +336,64 @@ class PeerNode:
                 elif isinstance(p, PeerInfo):
                     if p.peer_id != self.peer_id:
                         new_peers[p.peer_id] = p
+
             with self._peers_lock:
+                old_peers = dict(self.known_peers)   # snapshot before replacing
                 self.known_peers = new_peers
+
             if self.conn_manager:
-                self.conn_manager.update_peers(list(new_peers.values()))
+                online_only = [p for p in new_peers.values() if p.online]
+                self.conn_manager.update_peers(online_only)
+
+            # Detect online↔offline transitions and notify frontend.
+            # Bootstrap only broadcasts online peers, so an absent entry = offline.
+            if self.on_message_callback:
+                # online → offline (peer was online, now absent or offline)
+                for pid, old_info in old_peers.items():
+                    new_info = new_peers.get(pid)
+                    if old_info.online and (new_info is None or not new_info.online):
+                        try:
+                            self.on_message_callback(pid, {
+                                "type": "PEER_STATUS",
+                                "peer_id": pid,
+                                "online": False,
+                                "username": old_info.username,
+                                "timestamp": time.time(),
+                            })
+                        except Exception as e:
+                            logger.debug(f"Callback error on peer offline: {e}")
+                # offline → online (peer is now online but was missing or offline before)
+                for pid, new_info in new_peers.items():
+                    old_info = old_peers.get(pid)
+                    was_online = old_info.online if old_info else False
+                    if new_info.online and not was_online:
+                        try:
+                            self.on_message_callback(pid, {
+                                "type": "PEER_STATUS",
+                                "peer_id": pid,
+                                "online": True,
+                                "username": new_info.username,
+                                "timestamp": time.time(),
+                            })
+                        except Exception as e:
+                            logger.debug(f"Callback error on peer online: {e}")
+
+            # Reset peer-heartbeat fail count for peers confirmed online by bootstrap
+            with self._peer_hb_lock:
+                for pid, info in new_peers.items():
+                    if info.online and self._peer_hb_fail_count.get(pid, 0) > 0:
+                        self._peer_hb_fail_count[pid] = 0
         except Exception as e:
             logger.error(f"_update_peers error: {e}")
+
+    def set_presence(self, online: bool) -> bool:
+        """Toggle 'Tàng hình' mode. False → invisible to others (offline).
+        True → resume online. Sends STATUS_UPDATE to bootstrap for immediate effect."""
+        self._presence_enabled = online
+        msg = StatusUpdateMsg(peer_id=self.peer_id, online=online)
+        sent = self._send_to_bootstrap(msg)
+        logger.info(f"Presence set to {'online' if online else 'offline (invisible)'}")
+        return sent
 
     def _send_to_bootstrap(self, msg) -> bool:
         """Thread-safe send to bootstrap connection."""
@@ -378,10 +504,10 @@ class PeerNode:
         }
 
     def get_messages(self, peer_id: str = None) -> list:
-        """Return inbox messages, optionally filtered by peer_id."""
+        """Return one-to-one inbox messages, optionally filtered by peer_id."""
         try:
             with self._inbox_lock:
-                msgs = list(self.inbox)
+                msgs = [m for m in self.inbox if not m.get("group_id")]
             if peer_id:
                 return [
                     m for m in msgs

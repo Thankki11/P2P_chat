@@ -93,6 +93,8 @@ class BootstrapServer:
                         self._handle_heartbeat(data)
                     elif msg_type == MsgType.STORE_FWD:
                         self._handle_store_fwd(conn, data)
+                    elif msg_type == MsgType.STATUS_UPDATE:
+                        self._handle_status_update(conn, data)
                     else:
                         logger.warning(f"Unknown message type '{msg_type}' from {addr}")
                 except Exception as e:
@@ -122,15 +124,17 @@ class BootstrapServer:
                 host=data["host"],
                 port=data["port"],
                 online=True,
-                last_seen=time.time()
+                last_seen=time.time(),
+                public_key=data.get("public_key", ""),
             )
             with self._lock:
                 self.registry[peer_id] = peer
                 self.last_seen[peer_id] = time.time()
                 self.connections[peer_id] = conn
 
-            # Send current peer list to the newly registered peer
-            peers = self.get_online_peers(exclude=peer_id)
+            # Send current peer list to the newly registered peer.
+            # Include offline peers too so they show as gray dots in the UI.
+            peers = self.get_all_peers(exclude=peer_id)
             try:
                 conn.sendall(encode(PeerListMsg(peers=peers)))
             except OSError as e:
@@ -168,6 +172,41 @@ class BootstrapServer:
                     self.registry[peer_id].online = True
         except Exception as e:
             logger.error(f"_handle_heartbeat error: {e}")
+
+    def _handle_status_update(self, conn: socket.socket, data: dict) -> None:
+        """Handle explicit presence toggle (Tàng hình). Updates registry + broadcasts.
+        When going back online, flush any queued store-and-forward messages."""
+        try:
+            peer_id = data.get("peer_id")
+            online = bool(data.get("online", True))
+            if not peer_id:
+                return
+            changed = False
+            with self._lock:
+                if peer_id in self.registry:
+                    if self.registry[peer_id].online != online:
+                        self.registry[peer_id].online = online
+                        changed = True
+                    if online:
+                        # Reset timestamp so the cleanup thread doesn't immediately re-offline
+                        self.last_seen[peer_id] = time.time()
+                        self.registry[peer_id].last_seen = time.time()
+
+            # Flush queued messages when returning online
+            if online and self.message_handler:
+                queued = self.message_handler.flush_queue(peer_id)
+                for msg_dict in queued:
+                    try:
+                        conn.sendall((json.dumps(msg_dict) + "\n").encode("utf-8"))
+                    except OSError:
+                        logger.debug(f"Flush failed for {peer_id}")
+                        break
+
+            if changed:
+                self.broadcast_peer_list()
+                logger.info(f"Peer {peer_id} presence → {'online' if online else 'offline (invisible)'}")
+        except Exception as e:
+            logger.error(f"_handle_status_update error: {e}")
 
     def _handle_store_fwd(self, conn: socket.socket, data: dict) -> None:
         """Queue a store-and-forward message and ACK the sender."""
@@ -220,10 +259,21 @@ class BootstrapServer:
             logger.error(f"get_online_peers error: {e}")
             return []
 
-    def broadcast_peer_list(self, exclude: str = None) -> None:
-        """Send updated peer list to all connected peers. Silently remove dead connections."""
+    def get_all_peers(self, exclude: str = None) -> list:
+        """Return all known PeerInfo objects (online + offline) for UI display.
+        Offline peers keep showing in the sidebar as gray dots."""
         try:
-            peers = self.get_online_peers()
+            with self._lock:
+                return [p for pid, p in self.registry.items() if pid != exclude]
+        except Exception as e:
+            logger.error(f"get_all_peers error: {e}")
+            return []
+
+    def broadcast_peer_list(self, exclude: str = None) -> None:
+        """Send updated peer list to all connected peers. Silently remove dead connections.
+        Broadcasts ALL peers (online + offline) so offline peers show as gray dots in UI."""
+        try:
+            peers = self.get_all_peers()
             with self._lock:
                 conns = dict(self.connections)
             dead = []

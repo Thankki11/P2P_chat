@@ -6,7 +6,7 @@ export default function NotificationBadge({ count }) {
   if (!count || count === 0) return null
 
   return (
-    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white text-xs font-bold">
+    <span className="inline-flex items-center justify-center w-6 h-6 shrink-0 rounded-full bg-gradient-to-r from-red-500 to-rose-600 text-white text-[11px] font-black shadow-md shadow-red-500/20 leading-none">
       {count > 99 ? '99+' : count}
     </span>
   )

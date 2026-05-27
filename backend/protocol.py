@@ -17,13 +17,15 @@ from pydantic import BaseModel, ConfigDict, Field
 # ---------------------------------------------------------------------------
 
 class MsgType(str, Enum):
-    REGISTER  = "REGISTER"
-    PEER_LIST = "PEER_LIST"
-    CHAT_MSG  = "CHAT_MSG"
-    GROUP_MSG = "GROUP_MSG"
-    HEARTBEAT = "HEARTBEAT"
-    ACK       = "ACK"
-    STORE_FWD = "STORE_FWD"
+    REGISTER       = "REGISTER"
+    PEER_LIST      = "PEER_LIST"
+    CHAT_MSG       = "CHAT_MSG"
+    GROUP_MSG      = "GROUP_MSG"
+    HEARTBEAT      = "HEARTBEAT"
+    PEER_HEARTBEAT = "PEER_HEARTBEAT"
+    ACK            = "ACK"
+    STORE_FWD      = "STORE_FWD"
+    STATUS_UPDATE  = "STATUS_UPDATE"
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +41,7 @@ class PeerInfo(BaseModel):
     port: int
     online: bool = True
     last_seen: float = 0.0
+    public_key: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +56,7 @@ class RegisterMsg(BaseModel):
     username: str
     host: str
     port: int
+    public_key: str = ""
 
 
 class PeerListMsg(BaseModel):
@@ -96,6 +100,14 @@ class HeartbeatMsg(BaseModel):
     timestamp: float
 
 
+class PeerHeartbeatMsg(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    type: str = Field(default=MsgType.PEER_HEARTBEAT)
+    from_id: str
+    timestamp: float
+
+
 class AckMsg(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
@@ -111,6 +123,14 @@ class StoreFwdMsg(BaseModel):
     msg_id: str
     target_id: str
     payload: Dict[str, Any]
+
+
+class StatusUpdateMsg(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    type: str = Field(default=MsgType.STATUS_UPDATE)
+    peer_id: str
+    online: bool
 
 
 # ---------------------------------------------------------------------------
