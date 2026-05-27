@@ -74,5 +74,4 @@ Mở trình duyệt: <http://localhost:5173>
 
 | Tài liệu | Mô tả |
 |----------|-------|
-| [BAO_CAO.md](BAO_CAO.md) | Báo cáo thiết kế dạng Markdown |
-| [Báo cáo.pdf](https://drive.google.com/file/d/1vaoOQ0ynwwb7B8fzkrAqRJ1KGCIR8Gst/view?usp=sharing) | Báo cáo PDF hoàn chỉnh |
+| [Báo cáo.pdf](https://drive.google.com/file/d/13u3VJRcfOyK3vhO81yf8BL_70nf2rGe0/view?usp=sharing) | Báo cáo PDF hoàn chỉnh |
